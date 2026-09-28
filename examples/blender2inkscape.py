@@ -40,17 +40,16 @@ def getSVGPt(co):
     proj_4d = view_matrix @ Vector((co[0], co[1], co[2], 1.0))
 
     # 3. Perspective Division
-    if proj_4d.w != 0:
-        x_ndc = proj_4d.x / proj_4d.w
-        y_ndc = proj_4d.y / proj_4d.w
-    else:
-        # Fallback for degenerate points
-        x_ndc, y_ndc = proj_4d.x, proj_4d.y
+    if proj_4d.w <= 1e-4:
+        return None
+
+    x_ndc = proj_4d.x / proj_4d.w
+    y_ndc = proj_4d.y / proj_4d.w
 
     # 4. Convert NDC (-1 to 1 range) to Screen Space (0 to 1 range)
     # SVG coordinates: (0,0) is top-left.
     final_x = (x_ndc + 1.0) / 2.0
-    final_y = (y_ndc + 1.0) / 2.0
+    final_y = (1.0 - y_ndc) / 2.0
 
     return Vector((final_x, final_y, 0))
 
@@ -74,16 +73,21 @@ def subdivide_cubic(p0, p1, p2, p3, t=0.5):
     # Segment 2: p0123, p123, p23, p3
     return (p0, p01, p012, p0123), (p0123, p123, p23, p3)
 
-def approx_segment_recursive(p0, p1, p2, p3, tolerance=0.5):
+def approx_segment_recursive(p0, p1, p2, p3, tolerance=0.5, depth=0, max_depth=8):
     """
     Recursively approximate the 3D segment.
     If the single-segment fit has > tolerance error (in pixels/screen units),
     subdivide and recurse.
     """
+    if depth >= max_depth:
+        return [[p0, p1, p2, p3]]
+
     # 1. Generate candidate fit for full segment
     # (We reuse the tangent-preserving logic here, but inline or simplified)
     
     q0, q1, q2, q3 = approx_segment_single(p0, p1, p2, p3)
+    if any(pt is None for pt in (q0, q1, q2, q3)):
+        return []
     
     # 2. Error Check.
     # The 'approx_segment_single' guarantees exact match at t=0, 0.5, 1.0.
@@ -119,8 +123,8 @@ def approx_segment_recursive(p0, p1, p2, p3, tolerance=0.5):
     if dist_sq_25 > threshold or dist_sq_75 > threshold:
         # Error too high, subdivide!
         seg1, seg2 = subdivide_cubic(p0, p1, p2, p3, 0.5)
-        return (approx_segment_recursive(*seg1, tolerance) + 
-                approx_segment_recursive(*seg2, tolerance))
+        return (approx_segment_recursive(*seg1, tolerance=tolerance, depth=depth + 1, max_depth=max_depth) + 
+                approx_segment_recursive(*seg2, tolerance=tolerance, depth=depth + 1, max_depth=max_depth))
     
     return [[q0, q1, q2, q3]]
 
@@ -277,44 +281,7 @@ else:
                     # Point 1 (Shared): L=q2, C=q3, R=q4
                     
                     if segments_list:
-                        # First point
-                        seg0 = segments_list[0]
-                        # For the very first point, L is irrelevant (unless cyclic).
-                        # Let's reconstruct the list of Knot Points.
-                        
-                        # Point 0
-                        points_data.append([ [seg0[0].x, seg0[0].y], [seg0[0].x, seg0[0].y], [seg0[1].x, seg0[1].y] ])
-                        
-                        # Middle points
-                        for k in range(len(segments_list)-1):
-                            prev_seg = segments_list[k] # ... q2, q3
-                            next_seg = segments_list[k+1] # q3, q4 ...
-                            
-                            # Knot is at prev_seg[3] == next_seg[0]
-                            # L = prev_seg[2]
-                            # C = prev_seg[3]
-                            # R = next_seg[1]
-                            l_pt = prev_seg[2]
-                            c_pt = prev_seg[3]
-                            r_pt = next_seg[1]
-                            points_data.append([ [l_pt.x, l_pt.y], [c_pt.x, c_pt.y], [r_pt.x, r_pt.y] ])
-                        
-                        # Last point
-                        last_seg = segments_list[-1]
-                        l_pt = last_seg[2]
-                        c_pt = last_seg[3]
-                        
-                        # If cyclic, we need to close the loop with the first point?
-                        if spline.use_cyclic_u:
-                            # The loop handled all segments.
-                            # But we need to update the FIRST point's "Left" handle to be the last segments "q2".
-                            # And the LAST point's "Right" handle?
-                            # In my loop above 'middle' points covered indices 0 to N-1 segments junctions.
-                            
-                            # Let's clean this up.
-                            pass # Handled by standard loop?
-                            
-                        # Standard list reconstruction is cleaner:
+                        # Standard list reconstruction
                         points_data = []
                         for k in range(len(segments_list)):
                             seg = segments_list[k]
@@ -379,7 +346,7 @@ else:
 
         # Start the sub-path at the first point's 'co'
         start_co = pts[0][1]
-        subpath = [f"M {start_co[0] * scale},{-start_co[1] * scale}"]
+        subpath = [f"M {start_co[0] * scale},{start_co[1] * scale}"]
 
         # Add segments between points
         for i in range(1, len(pts)):
@@ -387,9 +354,9 @@ else:
             curr_left = pts[i][0]
             curr_co = pts[i][1]
             subpath.append(
-                f"C {prev_right[0] * scale},{-prev_right[1] * scale} "
-                f"{curr_left[0] * scale},{-curr_left[1] * scale} "
-                f"{curr_co[0] * scale},{-curr_co[1] * scale}"
+                f"C {prev_right[0] * scale},{prev_right[1] * scale} "
+                f"{curr_left[0] * scale},{curr_left[1] * scale} "
+                f"{curr_co[0] * scale},{curr_co[1] * scale}"
             )
 
         # Handle the closing segment if the spline is cyclic
@@ -398,9 +365,9 @@ else:
             start_left = pts[0][0]
             start_co = pts[0][1]
             subpath.append(
-                f"C {prev_right[0] * scale},{-prev_right[1] * scale} "
-                f"{start_left[0] * scale},{-start_left[1] * scale} "
-                f"{start_co[0] * scale},{-start_co[1] * scale}"
+                f"C {prev_right[0] * scale},{prev_right[1] * scale} "
+                f"{start_left[0] * scale},{start_left[1] * scale} "
+                f"{start_co[0] * scale},{start_co[1] * scale}"
             )
             subpath.append("Z")
 

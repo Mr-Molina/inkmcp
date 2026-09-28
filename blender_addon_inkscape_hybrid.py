@@ -28,6 +28,7 @@ import subprocess
 import json
 import sys
 import os
+import re
 from bpy.types import Operator, AddonPreferences
 from bpy.props import StringProperty
 
@@ -42,17 +43,13 @@ def parse_hybrid_blocks(code):
     current_lines = []
     
     for line in lines:
-        stripped = line.strip()
-        if stripped == '# @local':
+        match = re.match(r'^\s*#\s*@(local|inkscape)\b', line, re.IGNORECASE)
+        if match:
+            block_type = match.group(1).lower()
             if current_lines:
                 blocks.append((current_type, '\n'.join(current_lines)))
                 current_lines = []
-            current_type = 'local'
-        elif stripped == '# @inkscape':
-            if current_lines:
-                blocks.append((current_type, '\n'.join(current_lines)))
-                current_lines = []
-            current_type = 'inkscape'
+            current_type = block_type
         else:
             current_lines.append(line)
     
@@ -105,20 +102,30 @@ def execute_inkscape_block(code, variables, inkmcp_cli_path):
             'variables': {}
         }
     
-    # Inject variables with safe repr
-    var_injections = []
-    for key, value in variables.items():
+    # PERF-003: Serialize variables with a structured json.loads bootstrap when present
+    if variables:
         try:
-            # Test repr() produces valid Python
-            repr_value = repr(value)
-            if repr_value and repr_value != '':
-                var_injections.append(f"{key} = {repr_value}")
-            else:
-                print(f"Warning: Skipping {key} - repr() returned empty")
-        except Exception as e:
-            print(f"Warning: Cannot inject variable '{key}': {e}")
-    
-    full_code = '\n'.join(var_injections) + '\n' + code if var_injections else code
+            serialized_json = json.dumps(variables)
+            var_injections = [
+                "import json",
+                f"_inkmcp_vars = json.loads({json.dumps(serialized_json)})",
+            ]
+            for key in variables:
+                var_injections.append(f"{key} = _inkmcp_vars[{json.dumps(key)}]")
+            var_injections.append("del _inkmcp_vars")
+            full_code = '\n'.join(var_injections) + '\n' + code
+        except Exception:
+            var_injections = []
+            for key, value in variables.items():
+                try:
+                    repr_value = repr(value)
+                    if repr_value and repr_value != '':
+                        var_injections.append(f"{key} = {repr_value}")
+                except Exception:
+                    pass
+            full_code = '\n'.join(var_injections) + '\n' + code if var_injections else code
+    else:
+        full_code = code
     
     # Write to temp file to avoid shell escaping
     import tempfile
@@ -207,6 +214,14 @@ class SCRIPT_OT_run_hybrid(Operator):
     bl_idname = "script.run_hybrid"
     bl_label = "Run Hybrid Code"
     bl_options = {'REGISTER'}
+
+    @classmethod
+    def poll(cls, context):
+        return (
+            context.space_data is not None
+            and context.space_data.type == 'TEXT_EDITOR'
+            and getattr(context.space_data, 'text', None) is not None
+        )
 
     def execute(self, context):
         # Get preferences
@@ -312,10 +327,16 @@ def register():
 
 def unregister():
     for km, kmi in addon_keymaps:
-        km.keymap_items.remove(kmi)
+        try:
+            km.keymap_items.remove(kmi)
+        except Exception:
+            pass
     addon_keymaps.clear()
     
-    bpy.types.TEXT_MT_text.remove(menu_func)
+    try:
+        bpy.types.TEXT_MT_text.remove(menu_func)
+    except Exception:
+        pass
     bpy.utils.unregister_class(SCRIPT_OT_run_hybrid)
     bpy.utils.unregister_class(InkscapeHybridPreferences)
 

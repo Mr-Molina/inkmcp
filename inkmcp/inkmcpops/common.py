@@ -25,9 +25,10 @@ def create_error_response(error_message: str, **data) -> Dict[str, Any]:
 
 def get_element_info_data(element) -> Dict[str, Any]:
     """Extract comprehensive element information"""
+    tag = element.tag.split('}')[-1] if isinstance(element.tag, str) else "#comment"
     element_info = {
         "id": element.get('id', 'no-id'),
-        "tag": element.tag.split('}')[-1],  # Remove namespace
+        "tag": tag,
         "label": element.get('{http://www.inkscape.org/namespaces/inkscape}label', None),
     }
 

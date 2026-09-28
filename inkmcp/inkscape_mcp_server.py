@@ -7,9 +7,11 @@ Provides access to Inkscape operations through a unified tool interface
 for SVG element creation, document manipulation, and code execution.
 """
 
+import asyncio
 import json
 import logging
 import os
+import shutil
 import subprocess
 import tempfile
 from contextlib import asynccontextmanager
@@ -44,6 +46,10 @@ class InkscapeConnection:
 
     def is_available(self) -> bool:
         """Check if Inkscape is running and MCP extension is available"""
+        if not shutil.which("gdbus"):
+            logger.warning("gdbus executable not found in system PATH")
+            return False
+
         try:
             cmd = [
                 "gdbus",
@@ -72,11 +78,13 @@ class InkscapeConnection:
 
     def execute_operation(self, operation_data: Dict[str, Any]) -> Dict[str, Any]:
         """Execute operation using CLI client"""
+        params_file = None
         try:
             # Write operation data to temporary file
-            params_file = os.path.join(tempfile.gettempdir(), "mcp_params.json")
-
-            with open(params_file, "w") as f:
+            params_fd, params_file = tempfile.mkstemp(
+                suffix=".json", prefix="inkmcp_params_"
+            )
+            with os.fdopen(params_fd, "w") as f:
                 json.dump(operation_data, f)
 
             # Execute via D-Bus
@@ -91,7 +99,7 @@ class InkscapeConnection:
                 "--method",
                 f"{self.dbus_interface}.Activate",
                 self.action_name,
-                "[]",
+                f"[<'{params_file}'>]",
                 "{}",
             ]
 
@@ -106,11 +114,37 @@ class InkscapeConnection:
 
             # Read response from response file
             response_file = operation_data.get("response_file")
-            if response_file and os.path.exists(response_file):
+            if response_file:
+                # Validate response_file realpath resides strictly inside tempfile.gettempdir()
+                temp_dir = os.path.realpath(tempfile.gettempdir())
+                resp_real = os.path.realpath(response_file)
                 try:
-                    with open(response_file, "r") as f:
+                    is_safe = (
+                        os.path.commonpath([temp_dir, resp_real]) == temp_dir
+                        and resp_real != temp_dir
+                    )
+                except (ValueError, TypeError):
+                    is_safe = False
+
+                if not is_safe:
+                    logger.error(f"Response file path outside temp directory: {response_file}")
+                    return {
+                        "status": "error",
+                        "data": {"error": f"Response file error: Path outside temp directory: {response_file}"},
+                    }
+
+                # Verify response file exists and has non-zero size
+                if not os.path.exists(resp_real) or os.path.getsize(resp_real) == 0:
+                    logger.error(f"Response file missing or empty: {response_file}")
+                    return {
+                        "status": "error",
+                        "data": {"error": "Response file error: Extension failed to produce output (file missing or empty)"},
+                    }
+
+                try:
+                    with open(resp_real, "r") as f:
                         response_data = json.load(f)
-                    os.remove(response_file)  # Clean up
+                    os.remove(resp_real)  # Clean up
                     return response_data
                 except Exception as e:
                     logger.error(f"Failed to read response file: {e}")
@@ -128,6 +162,12 @@ class InkscapeConnection:
         except Exception as e:
             logger.error(f"Operation execution error: {e}")
             return {"status": "error", "data": {"error": str(e)}}
+        finally:
+            if params_file and os.path.exists(params_file):
+                try:
+                    os.remove(params_file)
+                except OSError:
+                    pass
 
 
 # Global connection instance
@@ -158,7 +198,7 @@ async def server_lifespan(server: FastMCP) -> AsyncIterator[Dict[str, Any]]:
     try:
         # Test connection on startup
         try:
-            get_inkscape_connection()
+            await asyncio.to_thread(get_inkscape_connection)
             logger.info("Successfully connected to Inkscape on startup")
         except Exception as e:
             logger.warning(f"Could not connect to Inkscape on startup: {e}")
@@ -265,7 +305,7 @@ def format_response(result: Dict[str, Any]) -> str:
 
 
 @mcp.tool()
-def inkscape_operation(ctx: Context, command: str) -> Union[str, ImageContent]:
+async def inkscape_operation(ctx: Context, command: str) -> Union[str, ImageContent]:
     """
     Execute any Inkscape operation using the extension system.
 
@@ -362,7 +402,7 @@ def inkscape_operation(ctx: Context, command: str) -> Union[str, ImageContent]:
     """
     response_file = None
     try:
-        connection = get_inkscape_connection()
+        connection = await asyncio.to_thread(get_inkscape_connection)
 
         # Create unique response file for this operation
         response_fd, response_file = tempfile.mkstemp(
@@ -381,7 +421,7 @@ def inkscape_operation(ctx: Context, command: str) -> Union[str, ImageContent]:
         logger.info(f"Executing command: {command}")
         logger.debug(f"Parsed data: {parsed_data}")
 
-        result = connection.execute_operation(parsed_data)
+        result = await asyncio.to_thread(connection.execute_operation, parsed_data)
 
         # Handle image export special case
         if (
@@ -403,7 +443,13 @@ def inkscape_operation(ctx: Context, command: str) -> Union[str, ImageContent]:
         # Clean up response file if it exists
         if response_file and os.path.exists(response_file):
             try:
-                os.remove(response_file)
+                temp_dir = os.path.realpath(tempfile.gettempdir())
+                resp_real = os.path.realpath(response_file)
+                if (
+                    os.path.commonpath([temp_dir, resp_real]) == temp_dir
+                    and resp_real != temp_dir
+                ):
+                    os.remove(response_file)
             except OSError:
                 pass
 

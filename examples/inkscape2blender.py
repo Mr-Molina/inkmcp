@@ -22,10 +22,11 @@ def export_to_blender_cleaned():
         }
 
         path_obj = elem.to_path_element()
-        superpath = path_obj.path.to_absolute().to_superpath()
+        transformed_path = path_obj.path.transform(elem.composed_transform())
+        superpath = transformed_path.to_absolute().to_superpath()
 
         # Check if Inkscape path actually ends with 'Z'
-        path_cmds = path_obj.path.to_arrays()
+        path_cmds = transformed_path.to_arrays()
         is_cyclic = len(path_cmds) > 0 and path_cmds[-1][0] == "Z"
 
         for subpath in superpath:
@@ -153,8 +154,8 @@ def create_blender_curves(data):
                     p.handle_left_type = "VECTOR"
                     p.handle_right_type = "VECTOR"
                 else:
-                    p.handle_left_type = "ALIGNED"
-                    p.handle_right_type = "ALIGNED"
+                    p.handle_left_type = "FREE"
+                    p.handle_right_type = "FREE"
 
 
 # Import data

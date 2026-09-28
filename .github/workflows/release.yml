@@ -1,18 +1,51 @@
 name: Create Release
 
-on:
+'on':
   push:
     tags:
-      - "*"
+      - "v[0-9]+.[0-9]+.[0-9]+*"
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
 
 jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@42375524e23c412d93fb67b49958b491fce71c38 # v5.4.0
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r inkmcp/requirements.txt
+          pip install pytest
+
+      - name: Compile check
+        run: |
+          python -m compileall inkmcp/
+
+      - name: Run tests
+        run: |
+          pytest -v
+
   build:
+    needs: test
+    if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
       - name: Create Plugin Zip
         run: |
@@ -26,14 +59,19 @@ jobs:
           # Copy the entire inkmcp subfolder maintaining structure
           cp -r inkmcp package/
 
-          # Create the zip file
+          # Remove transient/cache files before zipping
+          find package -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
+          find package -type d -name "venv" -exec rm -rf {} + 2>/dev/null || true
+          find package -type f -name "*.pyc" -delete 2>/dev/null || true
+
+          # Create the zip file excluding cache, bytecode, venv, and transient files
           cd package
-          zip -r ../inkmcp-extension.zip .
+          zip -r ../inkmcp-extension.zip . -x "**/__pycache__/*" "*__pycache__*" "*.pyc" "**/venv/*" "*venv*" "*.DS_Store" "*~" "*.swp"
           cd ..
 
       - name: Create Release
         id: create_release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@c062e08bd532815e2082a85e87e3ef29c3e6d191 # v2.0.8
         with:
           name: Latest Development Build
           body: |
@@ -50,4 +88,3 @@ jobs:
             inkmcp-extension.zip
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-

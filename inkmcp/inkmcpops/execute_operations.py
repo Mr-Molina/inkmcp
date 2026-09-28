@@ -1,5 +1,6 @@
 """Code execution operations module"""
 
+import builtins
 import io
 import traceback
 from contextlib import redirect_stdout, redirect_stderr
@@ -16,9 +17,20 @@ def execute_code(extension_instance, svg, attributes: Dict[str, Any]) -> Dict[st
 
         return_output = attributes.get('return_output', True)
 
+        # Restrict builtins to safe primitives whitelist
+        safe_builtins = {
+            name: getattr(builtins, name)
+            for name in (
+                "abs", "all", "any", "bool", "dict", "enumerate", "float", "int",
+                "len", "list", "max", "min", "range", "round", "set", "str",
+                "sum", "tuple", "zip", "print"
+            )
+            if hasattr(builtins, name)
+        }
+
         # Set up execution context following inkex patterns
         execution_globals = {
-            '__builtins__': __builtins__,
+            '__builtins__': safe_builtins,
             'svg': svg,
             'self': extension_instance,  # Reference to extension instance
             'document': svg,  # Alias for convenience
@@ -75,13 +87,11 @@ def execute_code(extension_instance, svg, attributes: Dict[str, Any]) -> Dict[st
             import random
             import json
             import re
-            import os
             execution_globals.update({
                 'math': math,
                 'random': random,
                 'json': json,
                 're': re,
-                'os': os,
             })
         except ImportError:
             pass
@@ -129,6 +139,8 @@ def execute_code(extension_instance, svg, attributes: Dict[str, Any]) -> Dict[st
             # Capture any return value
             if 'result' in execution_locals:
                 result_data["return_value"] = str(execution_locals['result'])
+            elif 'result' in execution_globals:
+                result_data["return_value"] = str(execution_globals['result'])
 
         except Exception as e:
             error_traceback = traceback.format_exc()
@@ -192,6 +204,9 @@ def execute_code(extension_instance, svg, attributes: Dict[str, Any]) -> Dict[st
 
         # Determine message based on execution success
         message = "Code executed successfully" if result_data["execution_successful"] else "Code execution failed"
+
+        if not result_data["execution_successful"]:
+            return create_error_response(message, **result_data)
 
         return create_success_response(message, **result_data)
 

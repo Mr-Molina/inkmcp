@@ -9,10 +9,10 @@ cd "$(dirname "$0")"
 
 # Activate Python virtual environment (create if doesn't exist)
 if [ ! -d "venv" ]; then
-    echo "Creating Python virtual environment..."
+    echo "Creating Python virtual environment..." >&2
     python3 -m venv venv
     source venv/bin/activate
-    pip install -r requirements.txt
+    pip install -r requirements.txt >&2
 else
     source venv/bin/activate
 fi

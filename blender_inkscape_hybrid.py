@@ -30,6 +30,8 @@ import subprocess
 import json
 import sys
 import os
+import re
+import tempfile
 from typing import List, Tuple, Dict, Any
 import io
 from contextlib import redirect_stdout, redirect_stderr
@@ -67,18 +69,13 @@ def parse_hybrid_blocks(code: str) -> List[Tuple[str, str]]:
     current_lines = []
     
     for line in lines:
-        stripped = line.strip()
-        
-        if stripped == '# @local':
+        match = re.match(r'^\s*#\s*@(local|inkscape)\b', line, re.IGNORECASE)
+        if match:
+            block_type = match.group(1).lower()
             if current_lines:
                 blocks.append((current_type, '\n'.join(current_lines)))
                 current_lines = []
-            current_type = 'local'
-        elif stripped == '# @inkscape':
-            if current_lines:
-                blocks.append((current_type, '\n'.join(current_lines)))
-                current_lines = []
-            current_type = 'inkscape'
+            current_type = block_type
         else:
             current_lines.append(line)
     
@@ -114,18 +111,51 @@ def serialize_variables(local_vars: Dict[str, Any], exclude_names: set = None) -
 
 def execute_inkscape_block(code: str, variables: Dict[str, Any]) -> Dict[str, Any]:
     """Execute code block in Inkscape via inkmcpcli."""
-    # Inject variables as code
-    var_injections = [f"{key} = {repr(value)}" for key, value in variables.items()]
-    full_code = '\n'.join(var_injections) + '\n' + code if var_injections else code
+    if not INKMCP_CLI_PATH:
+        return {
+            'success': False,
+            'error': "Cannot find inkmcpcli.py. Please set INKMCP_CLI_PATH.",
+            'variables': {}
+        }
+
+    # Inject variables
+    if variables:
+        try:
+            serialized_json = json.dumps(variables)
+            var_injections = [
+                "import json",
+                f"_inkmcp_vars = json.loads({json.dumps(serialized_json)})",
+            ]
+            for key in variables:
+                var_injections.append(f"{key} = _inkmcp_vars[{json.dumps(key)}]")
+            var_injections.append("del _inkmcp_vars")
+            full_code = '\n'.join(var_injections) + '\n' + code
+        except Exception:
+            var_injections = [f"{key} = {repr(value)}" for key, value in variables.items()]
+            full_code = '\n'.join(var_injections) + '\n' + code if var_injections else code
+    else:
+        full_code = code
     
-    # Call inkmcpcli
+    # Write to temp file to avoid command-line argument injection and truncation (LOGIC-021 / SEC-006)
+    temp_file = None
     try:
-        result = subprocess.run(
-            [sys.executable, INKMCP_CLI_PATH, 'execute-code', '--pretty', f"code='{full_code}'"],
-            capture_output=True,
-            text=True,
-            timeout=30
-        )
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False, encoding='utf-8') as f:
+            f.write(full_code)
+            temp_file = f.name
+
+        try:
+            result = subprocess.run(
+                [sys.executable, INKMCP_CLI_PATH, 'execute-code', '--pretty', '-f', temp_file],
+                capture_output=True,
+                text=True,
+                timeout=30
+            )
+        finally:
+            if temp_file:
+                try:
+                    os.unlink(temp_file)
+                except OSError:
+                    pass
         
         if result.returncode != 0:
             return {
@@ -137,19 +167,27 @@ def execute_inkscape_block(code: str, variables: Dict[str, Any]) -> Dict[str, An
         # Parse JSON response
         try:
             response = json.loads(result.stdout)
+            result_data = response.get('result', response)
             # Check if execute-code itself failed
-            if not response.get('success', False):
-                error = response.get('error') or response.get('response', {}).get('data', {}).get('errors', 'Unknown error')
+            if not result_data.get('success', False):
+                error = result_data.get('error') or result_data.get('response', {}).get('data', {}).get('errors', 'Unknown error')
                 return {
                     'success': False,
                     'error': error,
                     'variables': {}
                 }
+
+            inner_data = result_data.get('response', {}).get('data', {})
+            if not inner_data.get('execution_successful', True):
+                error = inner_data.get('errors') or inner_data.get('error') or 'Code execution failed'
+                return {'success': False, 'error': error, 'variables': {}}
+
+            # LOGIC-020: Return local_variables from Inkscape execution
             return {
                 'success': True,
-                'output': response.get('response', {}).get('data', {}).get('output', ''),
+                'output': inner_data.get('output', ''),
                 'error': None,
-                'variables': {}
+                'variables': inner_data.get('local_variables', {})
             }
         except json.JSONDecodeError:
             return {

@@ -71,6 +71,9 @@ import tempfile
 import os
 import subprocess
 import re
+import io
+import tokenize
+import builtins
 from typing import Dict, List, Any
 
 
@@ -82,8 +85,8 @@ def strip_python_comments(code: str) -> str:
     - Inline comments (# at end of line)
     
     Preserves:
-    - # characters inside strings
-    - # characters in certain contexts (like f-strings, format strings)
+    - Docstrings and multiline strings
+    - Hex colors and hashes inside quotes
     
     Args:
         code: Python code string
@@ -93,54 +96,16 @@ def strip_python_comments(code: str) -> str:
     """
     if not code.strip():
         return code
-    
-    lines = code.split('\n')
-    cleaned_lines = []
-    
-    for line in lines:
-        stripped = line.lstrip()
-        
-        # Skip full-line comments
-        if stripped.startswith('#'):
-            continue
-        
-        # Handle inline comments - simple approach that works for most cases
-        # Remove everything after # if it's not inside quotes
-        in_single_quote = False
-        in_double_quote = False
-        escape_next = False
-        cleaned_line = []
-        
-        for i, char in enumerate(line):
-            if escape_next:
-                cleaned_line.append(char)
-                escape_next = False
-                continue
-            
-            if char == '\\':
-                escape_next = True
-                cleaned_line.append(char)
-                continue
-            
-            if char == "'" and not in_double_quote:
-                in_single_quote = not in_single_quote
-                cleaned_line.append(char)
-            elif char == '"' and not in_single_quote:
-                in_double_quote = not in_double_quote
-                cleaned_line.append(char)
-            elif char == '#' and not in_single_quote and not in_double_quote:
-                # Found inline comment, stop here
-                break
-            else:
-                cleaned_line.append(char)
-        
-        result_line = ''.join(cleaned_line).rstrip()
-        
-        # Only add non-empty lines
-        if result_line:
-            cleaned_lines.append(result_line)
-    
-    return '\n'.join(cleaned_lines)
+
+    try:
+        tokens = tokenize.generate_tokens(io.StringIO(code).readline)
+        filtered = [tok for tok in tokens if tok.type != tokenize.COMMENT]
+        untokenized = tokenize.untokenize(filtered)
+        lines = [line.rstrip() for line in untokenized.split('\n')]
+        return '\n'.join(lines)
+    except (tokenize.TokenError, IndentationError, SyntaxError):
+        # Fallback if code cannot be tokenized as valid Python
+        return code
 
 
 def parse_hybrid_blocks(code: str) -> List[tuple[str, str]]:
@@ -168,14 +133,14 @@ def parse_hybrid_blocks(code: str) -> List[tuple[str, str]]:
     for line in lines:
         stripped = line.strip()
         
-        # Check for magic comments
-        if stripped == '# @local':
+        # Check for magic comments (supporting whitespace and tabs)
+        if re.match(r'^#\s*@local$', stripped):
             # Save current block if it has content
             if current_lines:
                 blocks.append((current_type, '\n'.join(current_lines)))
                 current_lines = []
             current_type = 'local'
-        elif stripped == '# @inkscape':
+        elif re.match(r'^#\s*@inkscape$', stripped):
             # Save current block if it has content
             if current_lines:
                 blocks.append((current_type, '\n'.join(current_lines)))
@@ -222,6 +187,10 @@ def serialize_context_variables(local_vars: Dict[str, Any], exclude_names: set =
         if type(value).__name__ == 'module':
             continue
         
+        # Skip non-serializable callables/functions cleanly without raising TypeError
+        if callable(value) or isinstance(value, type):
+            continue
+
         # Test JSON serializability
         try:
             json.dumps(value)
@@ -262,7 +231,6 @@ def execute_hybrid_code(client: 'InkscapeClient', code: str, args) -> Dict[str, 
     Returns:
         Result dictionary with execution details
     """
-    import io
     from contextlib import redirect_stdout, redirect_stderr
     
     # Parse code into blocks
@@ -290,10 +258,21 @@ def execute_hybrid_code(client: 'InkscapeClient', code: str, args) -> Dict[str, 
         if block_type == 'local':
             # Execute locally
             try:
+                # Restrict builtins to safe primitives whitelist
+                safe_builtins = {
+                    name: getattr(builtins, name)
+                    for name in (
+                        "abs", "all", "any", "bool", "dict", "enumerate", "float", "int",
+                        "len", "list", "max", "min", "range", "round", "set", "str",
+                        "sum", "tuple", "zip", "print"
+                    )
+                    if hasattr(builtins, name)
+                }
+
                 # Set up local execution environment with standard modules
                 injected_names = {'json', 're', 'os', 'sys', '__builtins__'}
                 local_env = {
-                    '__builtins__': __builtins__,
+                    '__builtins__': safe_builtins,
                     'json': json,
                     're': re,
                     'os': os,
@@ -347,8 +326,9 @@ def execute_hybrid_code(client: 'InkscapeClient', code: str, args) -> Dict[str, 
                 # We need to inject the shared context as variable assignments
                 context_injection = []
                 for key, value in shared_context.items():
-                    # Serialize the value as Python literal using repr()
-                    context_injection.append(f"{key} = {repr(value)}")
+                    if str(key).isidentifier():
+                        # Serialize the value as Python literal using repr()
+                        context_injection.append(f"{key} = {repr(value)}")
                 
                 # Combine context injection with user code
                 full_inkscape_code = '\n'.join(context_injection) + '\n' + cleaned_code if context_injection else cleaned_code
@@ -457,6 +437,14 @@ def parse_children_array(children_str: str) -> List[Dict[str, Any]]:
 
     children_str = children_str.strip()
 
+    # Check if valid JSON list and return directly
+    try:
+        parsed_json = json.loads(children_str)
+        if isinstance(parsed_json, list):
+            return parsed_json
+    except (json.JSONDecodeError, ValueError, TypeError):
+        pass
+
     # Remove outer brackets
     if children_str.startswith('[') and children_str.endswith(']'):
         children_str = children_str[1:-1].strip()
@@ -530,7 +518,13 @@ def parse_tag_and_attributes(content: str) -> Dict[str, Any] | None:
         return None
 
     tag = parts[0]
-    attr_str = parts[1] if len(parts) > 1 else ""
+    attr_str = parts[1].strip() if len(parts) > 1 else ""
+
+    # Strip surrounding single/double quotes from attr_str if present
+    if (len(attr_str) >= 2 and 
+        ((attr_str.startswith("'") and attr_str.endswith("'")) or 
+         (attr_str.startswith('"') and attr_str.endswith('"')))):
+        attr_str = attr_str[1:-1].strip()
 
     # Parse attributes using existing logic
     attributes = parse_attributes(attr_str)
@@ -566,27 +560,19 @@ def parse_attributes(param_str: str) -> Dict[str, Any]:
 
     attributes = {}
 
-    # Enhanced regex to handle quoted values, arrays, and objects (including multiline)
-    # Pattern explanation:
-    # - (\w+(?:[:-]\w+)*) : key name with optional hyphens/underscores/colons (for namespaces)
-    # - = : equals sign
-    # - Group of alternatives for value:
-    #   - "([^"]*)" : double quoted content (group 2)
-    #   - '([^']*)' : single quoted content (group 3)
-    #   - (\[(?:[^\[\]]|\{[^}]*\}|\[[^\]]*\])*\]) : array content (group 4)
-    #   - ([^\s,=]+) : unquoted content (group 5)
-    param_pattern = r'(\w+(?:[:-]\w+)*)=("([^"]*)"|\'([^\']*)\'|(\[(?:[^\[\]]|\{[^}]*\}|\[[^\]]*\])*\])|([^\s,=]+))'
+    # Refactored param_pattern (LOGIC-001 & LOGIC-007)
+    param_pattern = r'(\w+(?:[:-]\w+)*)=("((?:\\.|[^"\\])*)"|\'((?:\\.|[^\'\\])*)\'|(\[[^\]]*\])|([^\s,=]+))'
     raw_matches = re.findall(param_pattern, param_str, re.DOTALL)
 
     for match in raw_matches:
         key = match[0]
         full_value = match[1]
 
-        # Extract the actual value based on quoting type
+        # Extract the actual value based on quoting type and unescape quotes
         if full_value.startswith('"') and full_value.endswith('"'):
-            value = match[2]  # Double quoted content
+            value = match[2].replace(r'\"', '"').replace(r"\'", "'")
         elif full_value.startswith("'") and full_value.endswith("'"):
-            value = match[3]  # Single quoted content
+            value = match[3].replace(r"\'", "'").replace(r'\"', '"')
         elif full_value.startswith('['):
             value = match[4]  # Array content (keep as string for later parsing)
         else:
@@ -596,7 +582,7 @@ def parse_attributes(param_str: str) -> Dict[str, Any]:
         if key == 'children' and isinstance(value, str) and value.startswith('['):
             # Keep as string for later recursive parsing
             attributes[key] = value
-        elif value.startswith('[') and value.endswith(']'):
+        elif isinstance(value, str) and value.startswith('[') and value.endswith(']'):
             # Try to parse as JSON array
             try:
                 attributes[key] = json.loads(value)
@@ -637,20 +623,22 @@ class InkscapeClient:
         result = parse_tag_and_attributes(full_content)
         return result if result is not None else {"tag": tag, "attributes": {}}
 
-    def execute_command(self, element_data: Dict[str, Any]) -> Dict[str, Any]:
-        """Execute command via D-Bus"""
+    def execute_operation(self, element_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Execute operation via D-Bus"""
+        params_file = None
+        response_file = None
         try:
-            # Create temporary response file for reverse communication (like original system)
+            # Create temporary response file for reverse communication
             response_fd, response_file = tempfile.mkstemp(suffix='.json', prefix='inkmcp_response_')
             os.close(response_fd)  # Close the file descriptor, we just need the path
             element_data['response_file'] = response_file
 
-            # Write parameters to fixed JSON file (like original system)
-            params_file = os.path.join(tempfile.gettempdir(), "mcp_params.json")
-            with open(params_file, 'w') as f:
+            # Write parameters to unique JSON file
+            params_fd, params_file = tempfile.mkstemp(suffix='.json', prefix='inkmcp_params_')
+            with os.fdopen(params_fd, 'w') as f:
                 json.dump(element_data, f)
 
-            # Execute D-Bus command (like original system)
+            # Execute D-Bus command
             cmd = [
                 "gdbus", "call",
                 "--session",
@@ -658,7 +646,7 @@ class InkscapeClient:
                 "--object-path", self.dbus_path,
                 "--method", f"{self.dbus_interface}.Activate",
                 self.action_name,
-                "[]", "{}"
+                f"[<'{params_file}'>]", "{}"
             ]
 
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
@@ -669,8 +657,8 @@ class InkscapeClient:
                     "error": f"D-Bus command failed: {result.stderr}"
                 }
 
-            # Read response from response file (like original system)
-            if os.path.exists(response_file):
+            # Read response from response file
+            if response_file and os.path.exists(response_file):
                 try:
                     with open(response_file, 'r') as f:
                         response = json.load(f)
@@ -694,6 +682,21 @@ class InkscapeClient:
                 "success": False,
                 "error": f"Execution failed: {str(e)}"
             }
+        finally:
+            if params_file and os.path.exists(params_file):
+                try:
+                    os.unlink(params_file)
+                except OSError:
+                    pass
+            if response_file and os.path.exists(response_file):
+                try:
+                    os.unlink(response_file)
+                except OSError:
+                    pass
+
+    def execute_command(self, element_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Execute command via D-Bus (alias for execute_operation)"""
+        return self.execute_operation(element_data)
 
     def format_response(self, result: Dict[str, Any], tag: str = "") -> str:
         """Format the response for display - minimal output by default"""
@@ -758,8 +761,11 @@ class InkscapeClient:
                 error = response_data.get("data", {}).get("error", "Unknown error")
                 return f"Error: {error}"
 
-        except (json.JSONDecodeError, KeyError):
-            return "Success"
+        except (json.JSONDecodeError, KeyError) as e:
+            raw = result.get("output", "").strip()
+            if raw:
+                return f"Error: Failed to parse response ({str(e)}): {raw}"
+            return f"Error: Failed to parse response: {str(e)}"
 
 
 def main():

@@ -3,9 +3,11 @@
   <name>MCP Extension</name>
   <id>org.khema.inkscape.mcp</id>
 
-
-  <effect>
+  <effect needs-live-preview="false">
     <object-type>all</object-type>
+    <effects-menu>
+      <submenu name="MCP Bridge"/>
+    </effects-menu>
   </effect>
 
   <script>

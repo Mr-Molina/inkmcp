@@ -94,15 +94,7 @@ class ElementCreator(inkex.EffectExtension):
         # Set all attributes except id (already handled)
         for attr_name, attr_value in attributes.items():
             if attr_name != "id":
-                attrSet = False
-                if hasattr(element, attr_name):
-                    try:
-                        setattr(element, attr_name, attr_value)
-                        attrSet = True
-                    except Exception as _:
-                        pass
-                if not attrSet:
-                    element.set(attr_name, str(attr_value))
+                element.set(attr_name, str(attr_value))
 
         # Process children recursively with same tracking lists
         for child_data in children:
@@ -231,6 +223,14 @@ class ElementCreator(inkex.EffectExtension):
     def write_response(self, response_data: Dict[str, Any], response_file_path: str):
         """Write response to response file (like original system)"""
         try:
+            temp_dir = os.path.realpath(tempfile.gettempdir())
+            real_path = os.path.realpath(response_file_path)
+            if (
+                os.path.commonpath([temp_dir, real_path]) != temp_dir
+                or real_path == temp_dir
+            ):
+                return
+
             with open(response_file_path, "w") as f:
                 json.dump(response_data, f)
         except Exception:
@@ -248,7 +248,10 @@ class ElementCreator(inkex.EffectExtension):
                     "status": "error",
                     "data": {"error": "No parameters file found"},
                 }
-                self.write_response(response, "/tmp/error_response.json")
+                self.write_response(
+                    response,
+                    os.path.join(tempfile.gettempdir(), "inkmcp_error_response.json"),
+                )
                 return
 
             with open(params_file, "r") as f:
