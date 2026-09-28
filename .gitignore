@@ -1,2 +1,46 @@
+# Internal and editor directories
 internal/
 .claude/
+
+# Python bytecode and cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+
+# Virtual environments
+venv/
+.venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+
+# Build artifacts and packaging
+dist/
+build/
+package/
+*.zip
+*.egg-info/
+*.egg
+eggs/
+.eggs/
+parts/
+var/
+sdist/
+develop-eggs/
+.installed.cfg
+
+# Test caches and coverage
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+nosetests.xml
+coverage.xml
+*.cover
+.hypothesis/
+
+# IDE and tool caches
+.cache/
+*.tmp
