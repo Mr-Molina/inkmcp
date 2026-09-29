@@ -1,5 +1,6 @@
 import os
 from pathlib import Path
+import stat
 from unittest.mock import patch
 import pytest
 
@@ -61,6 +62,76 @@ def test_install_extension_missing_sources(tmp_path):
     dest_dir = tmp_path / "extensions"
 
     assert install_extension(repo_root=empty_root, target_dir=dest_dir) is False
+
+
+def test_install_extension_missing_pkg_dir(tmp_path):
+    fake_root = tmp_path / "fake_repo"
+    fake_root.mkdir()
+    (fake_root / "inkscape_mcp.inx").write_text("<test/>", encoding="utf-8")
+    (fake_root / "inkscape_mcp.py").write_text("# py", encoding="utf-8")
+    dest_dir = tmp_path / "extensions"
+
+    assert install_extension(repo_root=fake_root, target_dir=dest_dir) is False
+
+
+def test_install_extension_paths_with_spaces_and_unicode(tmp_path):
+    repo_root = Path(__file__).parent.parent
+    dest_dir = tmp_path / "Inkscape AppData 🎨 with spaces"
+    dest_dir.mkdir(parents=True)
+
+    success = install_extension(repo_root=repo_root, target_dir=dest_dir)
+    assert success is True
+    assert (dest_dir / "inkscape_mcp.inx").is_file()
+    assert (dest_dir / "inkscape_mcp.py").is_file()
+    assert (dest_dir / "inkmcp" / "inkmcpops").is_dir()
+
+
+def test_install_extension_destination_not_writable(tmp_path, monkeypatch):
+    repo_root = Path(__file__).parent.parent
+    dest_dir = tmp_path / "unwritable_extensions"
+    dest_dir.mkdir(parents=True)
+
+    monkeypatch.setattr("inkmcp.install_extension._is_writable", lambda p: False)
+    success = install_extension(repo_root=repo_root, target_dir=dest_dir)
+    assert success is False
+
+
+def test_install_extension_destination_out_of_bounds(tmp_path, monkeypatch):
+    repo_root = Path(__file__).parent.parent
+    dest_dir = tmp_path / "extensions"
+    dest_dir.mkdir(parents=True)
+
+    monkeypatch.setattr(Path, "is_relative_to", lambda self, other: False)
+    success = install_extension(repo_root=repo_root, target_dir=dest_dir)
+    assert success is False
+
+
+def test_install_extension_handles_os_error(tmp_path, monkeypatch):
+    repo_root = Path(__file__).parent.parent
+    dest_dir = tmp_path / "extensions"
+    dest_dir.mkdir(parents=True)
+
+    def mock_copy2(src, dst):
+        raise OSError("Disk full or permission denied")
+
+    monkeypatch.setattr("shutil.copy2", mock_copy2)
+    success = install_extension(repo_root=repo_root, target_dir=dest_dir)
+    assert success is False
+
+
+def test_install_extension_force_cleans_readonly_files(tmp_path):
+    repo_root = Path(__file__).parent.parent
+    dest_dir = tmp_path / "extensions"
+    dest_dir.mkdir(parents=True)
+
+    assert install_extension(repo_root=repo_root, target_dir=dest_dir) is True
+
+    # Mark a file inside dest / inkmcp as read-only
+    target_py = dest_dir / "inkmcp" / "__init__.py"
+    target_py.chmod(stat.S_IREAD)
+
+    # Force re-install should succeed and remove read-only files without crashing
+    assert install_extension(repo_root=repo_root, target_dir=dest_dir, force=True) is True
 
 
 def test_cli_main_check(tmp_path, monkeypatch):

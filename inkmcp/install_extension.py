@@ -7,6 +7,7 @@ import argparse
 import logging
 import os
 import shutil
+import stat
 import sys
 from pathlib import Path
 from typing import Optional
@@ -25,6 +26,32 @@ logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 logger = logging.getLogger("inkmcp.installer")
 
 
+def _is_writable(path: Path) -> bool:
+    """Check if the given path (or its nearest existing parent) is writable."""
+    cur = path
+    while not cur.exists() and cur != cur.parent:
+        cur = cur.parent
+    return os.access(cur, os.W_OK)
+
+
+def _handle_remove_readonly(func, path, exc_info):
+    """Clear read-only attribute and retry removal (for Python < 3.12)."""
+    try:
+        os.chmod(path, stat.S_IWRITE)
+        func(path)
+    except Exception:
+        pass
+
+
+def _on_exc_remove_readonly(func, path, exc):
+    """Clear read-only attribute and retry removal (for Python >= 3.12)."""
+    try:
+        os.chmod(path, stat.S_IWRITE)
+        func(path)
+    except Exception:
+        pass
+
+
 def check_extension_status(target_dir: Optional[Path] = None) -> bool:
     """Return True if extension files are present in target directory."""
     return is_extension_installed(target_dir)
@@ -37,19 +64,20 @@ def install_extension(
     force: bool = False,
 ) -> bool:
     """Copy extension files and inkmcp package to Inkscape user extensions directory."""
-    root = repo_root or Path(__file__).parent.parent.resolve()
-    dest = target_dir or get_inkscape_extensions_dir()
+    root = (repo_root or Path(__file__).parent.parent).resolve()
+    dest = (target_dir or get_inkscape_extensions_dir()).resolve()
 
     inx_src = root / "inkscape_mcp.inx"
     py_src = root / "inkscape_mcp.py"
     pkg_src = root / "inkmcp"
 
-    if not inx_src.is_file() or not py_src.is_file():
-        logger.error("Missing source files in repository root: %s", root)
+    if not inx_src.is_file() or not py_src.is_file() or not pkg_src.is_dir():
+        logger.error("Missing source files or inkmcp directory in repository root: %s", root)
         return False
 
-    if not dry_run:
-        dest.mkdir(parents=True, exist_ok=True)
+    if not dry_run and not _is_writable(dest):
+        logger.error("Destination directory is not writable: %s", dest)
+        return False
 
     logger.info("Target extensions directory: %s", dest)
 
@@ -58,29 +86,48 @@ def install_extension(
         (py_src, dest / "inkscape_mcp.py"),
     ]
 
-    for src, dst in files_to_copy:
-        if dst.exists() and not force:
-            logger.info("Already exists (use --force to overwrite): %s", dst.name)
-        else:
-            logger.info("Copying %s -> %s", src.name, dst)
-            if not dry_run:
-                shutil.copy2(src, dst)
-
-    # Copy inkmcp package directory
-    dest_pkg = dest / "inkmcp"
-    if dest_pkg.exists() and force and not dry_run:
-        shutil.rmtree(dest_pkg)
-
-    if not dest_pkg.exists():
-        logger.info("Copying package %s -> %s", pkg_src, dest_pkg)
+    try:
         if not dry_run:
-            shutil.copytree(
-                pkg_src,
-                dest_pkg,
-                ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "venv", ".pytest_cache"),
-            )
-    else:
-        logger.info("Package %s already exists", dest_pkg)
+            dest.mkdir(parents=True, exist_ok=True)
+
+        for src, dst in files_to_copy:
+            if not dst.resolve().is_relative_to(dest):
+                logger.error("Destination file path escapes target directory: %s", dst)
+                return False
+
+            if dst.exists() and not force:
+                logger.info("Already exists (use --force to overwrite): %s", dst.name)
+            else:
+                logger.info("Copying %s -> %s", src.name, dst)
+                if not dry_run:
+                    shutil.copy2(src, dst)
+
+        # Copy inkmcp package directory
+        dest_pkg = dest / "inkmcp"
+        if not dest_pkg.resolve().is_relative_to(dest):
+            logger.error("Destination package path escapes target directory: %s", dest_pkg)
+            return False
+
+        if dest_pkg.exists() and force and not dry_run:
+            if sys.version_info >= (3, 12):
+                shutil.rmtree(dest_pkg, onexc=_on_exc_remove_readonly)
+            else:
+                shutil.rmtree(dest_pkg, onerror=_handle_remove_readonly)
+
+        if not dest_pkg.exists():
+            logger.info("Copying package %s -> %s", pkg_src, dest_pkg)
+            if not dry_run:
+                shutil.copytree(
+                    pkg_src,
+                    dest_pkg,
+                    ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "venv", ".pytest_cache"),
+                )
+        else:
+            logger.info("Package %s already exists", dest_pkg)
+
+    except (PermissionError, OSError) as e:
+        logger.error("Failed to install extension files: %s", e)
+        return False
 
     logger.info("Installation completed successfully.")
     return True
