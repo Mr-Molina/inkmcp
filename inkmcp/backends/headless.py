@@ -9,7 +9,24 @@ from typing import Any, Dict, Optional
 import inkex
 
 from inkmcp.backends.base import InkscapeBackend
-from inkscape_mcp import ElementCreator
+try:
+    from inkscape_mcp import ElementCreator
+except ImportError:
+    import sys
+    from pathlib import Path
+
+    _repo_root = Path(__file__).resolve().parent.parent.parent
+    if str(_repo_root) not in sys.path:
+        sys.path.insert(0, str(_repo_root))
+    try:
+        from inkscape_mcp import ElementCreator
+    except ImportError:
+        from inkmcp.platform_utils import get_inkscape_extensions_dir
+
+        _ext_dir = get_inkscape_extensions_dir()
+        if str(_ext_dir) not in sys.path:
+            sys.path.append(str(_ext_dir))
+        from inkscape_mcp import ElementCreator
 from inkmcp.inkmcpops.element_mapping import (
     get_element_class,
     should_place_in_defs,
