@@ -55,6 +55,8 @@ class InkscapeConnection:
         self.dbus_interface = DEFAULT_DBUS_INTERFACE
         self.action_name = DEFAULT_ACTION_NAME
         self._client_path = Path(__file__).parent / "inkmcpcli.py"
+        self.allow_headless = allow_headless
+        self._custom_backend = backend is not None
 
         if backend is not None:
             self.backend: Optional[InkscapeBackend] = backend
@@ -87,13 +89,21 @@ class InkscapeConnection:
             return None
 
     def is_available(self) -> bool:
-        """Check if selected backend is available."""
+        """Check if selected backend is available, re-probing if currently unavailable."""
+        if not self._custom_backend:
+            if self.backend is None or not self.backend.is_available():
+                self.backend = self._select_backend(allow_headless=self.allow_headless)
+
         if self.backend is None:
             return False
         return self.backend.is_available()
 
     def execute_operation(self, operation_data: Dict[str, Any]) -> Dict[str, Any]:
-        """Execute operation using selected backend."""
+        """Execute operation using selected backend, re-probing if currently unavailable."""
+        if not self._custom_backend:
+            if self.backend is None or not self.backend.is_available():
+                self.backend = self._select_backend(allow_headless=self.allow_headless)
+
         if self.backend is None:
             return {
                 "status": "error",
@@ -120,10 +130,13 @@ def get_inkscape_connection() -> InkscapeConnection:
         _inkscape_connection = InkscapeConnection()
 
     if not _inkscape_connection.is_available():
-        raise Exception(
-            "Inkscape is not running or generic MCP extension is not available. "
-            "Please start Inkscape and ensure the generic MCP extension is installed."
-        )
+        # Re-attempt connection before raising
+        _inkscape_connection = InkscapeConnection()
+        if not _inkscape_connection.is_available():
+            raise Exception(
+                "Inkscape is not running or generic MCP extension is not available. "
+                "Please start Inkscape and ensure the generic MCP extension is installed."
+            )
 
     return _inkscape_connection
 

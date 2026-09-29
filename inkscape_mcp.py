@@ -239,13 +239,33 @@ class ElementCreator(inkex.EffectExtension):
     def effect(self):
         """Main extension entry point"""
         element_data = {}  # Initialize to avoid unbound variable
-        try:
-            # Check for --params-file first, fall back to mcp_params.json
-            params_file = getattr(self.options, "params_file", None)
-            if not params_file:
-                params_file = os.path.join(tempfile.gettempdir(), "mcp_params.json")
+        params_file = getattr(self.options, "params_file", None)
+        if not params_file:
+            params_file = os.path.join(tempfile.gettempdir(), "mcp_params.json")
 
-            if not os.path.exists(params_file):
+        temp_dir = os.path.realpath(tempfile.gettempdir())
+        params_real = os.path.realpath(params_file)
+        is_safe = False
+        try:
+            is_safe = (
+                os.path.commonpath([temp_dir, params_real]) == temp_dir
+                and params_real != temp_dir
+            )
+        except (ValueError, TypeError):
+            is_safe = False
+
+        if not is_safe:
+            self.write_response(
+                {
+                    "status": "error",
+                    "data": {"error": f"Params file outside temp directory: {params_file}"},
+                },
+                os.path.join(tempfile.gettempdir(), "inkmcp_error_response.json"),
+            )
+            return
+
+        try:
+            if not os.path.exists(params_real):
                 response = {
                     "status": "error",
                     "data": {"error": "No parameters file found"},
@@ -256,14 +276,8 @@ class ElementCreator(inkex.EffectExtension):
                 )
                 return
 
-            with open(params_file, "r", encoding="utf-8") as f:
+            with open(params_real, "r", encoding="utf-8") as f:
                 element_data = json.load(f)
-
-            # Clean up the params file after reading (like original system)
-            try:
-                os.remove(params_file)
-            except OSError:
-                pass
 
             tag = element_data.get("tag", "")
 
@@ -340,6 +354,12 @@ class ElementCreator(inkex.EffectExtension):
                     self.write_response(error_response, response_file)
             except Exception:
                 pass  # Silent error handling
+        finally:
+            if params_file and is_safe and os.path.exists(params_real):
+                try:
+                    os.remove(params_real)
+                except OSError:
+                    pass
 
 
 def main():

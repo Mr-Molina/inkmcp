@@ -626,7 +626,10 @@ class InkscapeClient:
     def execute_operation(self, element_data: Dict[str, Any]) -> Dict[str, Any]:
         """Execute operation via InkscapeConnection dispatcher"""
         try:
-            from inkmcp.inkscape_mcp_server import InkscapeConnection
+            try:
+                from inkmcp.inkscape_mcp_server import InkscapeConnection
+            except ImportError:
+                from inkscape_mcp_server import InkscapeConnection
 
             conn = InkscapeConnection()
             result = conn.execute_operation(element_data)

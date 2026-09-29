@@ -289,3 +289,63 @@ def test_dbus_backend_is_available():
         assert backend.is_available() is False
 
 
+def test_inkscape_connection_dynamic_reprobe():
+    """Verify that InkscapeConnection dynamically detects a backend becoming available after __init__."""
+    from inkmcp.inkscape_mcp_server import InkscapeConnection
+
+    # Initially: Inkscape is not running
+    with patch("inkmcp.inkscape_mcp_server.get_operating_system", return_value="windows"), \
+         patch("inkmcp.inkscape_mcp_server.is_inkscape_process_running", return_value=False):
+        conn = InkscapeConnection(allow_headless=False)
+        assert conn.backend is None
+        assert conn.is_available() is False
+
+        # Later: User launches Inkscape, so is_inkscape_process_running becomes True
+        with patch("inkmcp.inkscape_mcp_server.is_inkscape_process_running", return_value=True), \
+             patch("inkmcp.backends.windows_cli.WindowsCliBackend.is_available", return_value=True):
+            # Calling is_available() should re-probe and find the backend
+            assert conn.is_available() is True
+            assert conn.backend is not None
+            assert conn.backend.get_backend_name() == "windows_cli"
+
+
+def test_get_inkscape_connection_dynamic_reprobe():
+    """Verify get_inkscape_connection re-attempts when previous connection was unavailable."""
+    import inkmcp.inkscape_mcp_server as server_module
+
+    # Reset global
+    server_module._inkscape_connection = None
+
+    # First attempt: no GUI running -> raises exception
+    with patch("inkmcp.inkscape_mcp_server.get_operating_system", return_value="windows"), \
+         patch("inkmcp.inkscape_mcp_server.is_inkscape_process_running", return_value=False):
+        with pytest.raises(Exception, match="Inkscape is not running"):
+            server_module.get_inkscape_connection()
+
+    # Second attempt: GUI started -> succeeds
+    with patch("inkmcp.inkscape_mcp_server.get_operating_system", return_value="windows"), \
+         patch("inkmcp.inkscape_mcp_server.is_inkscape_process_running", return_value=True), \
+         patch("inkmcp.backends.windows_cli.WindowsCliBackend.is_available", return_value=True):
+        conn = server_module.get_inkscape_connection()
+        assert conn.is_available() is True
+        assert conn.backend.get_backend_name() == "windows_cli"
+
+
+def test_element_creator_effect_rejects_outside_params_file():
+    """Verify that ElementCreator.effect() rejects parameter files outside temp directory."""
+    from inkscape_mcp import ElementCreator
+
+    creator = ElementCreator()
+    creator.options = MagicMock()
+    outside_file = os.path.abspath(os.path.join(tempfile.gettempdir(), "..", "outside_params.json"))
+    creator.options.params_file = outside_file
+
+    with patch.object(creator, "write_response") as mock_write:
+        creator.effect()
+        assert mock_write.called
+        args, _ = mock_write.call_args
+        assert args[0]["status"] == "error"
+        assert "outside temp directory" in args[0]["data"]["error"]
+
+
+
