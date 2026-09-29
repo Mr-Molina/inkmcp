@@ -25,8 +25,7 @@ class ElementCreator(inkex.EffectExtension):
 
     def add_arguments(self, pars):
         """Add command line arguments"""
-        # No parameters needed - use fixed file path like original system
-        pass
+        pars.add_argument("--params-file", type=str, default="")
 
     # def errormsg(self, msg):
     #     """Override errormsg to prevent UI dialogs - silent operation only"""
@@ -241,8 +240,11 @@ class ElementCreator(inkex.EffectExtension):
         """Main extension entry point"""
         element_data = {}  # Initialize to avoid unbound variable
         try:
-            # Read JSON data from fixed file path (like original system)
-            params_file = os.path.join(tempfile.gettempdir(), "mcp_params.json")
+            # Check for --params-file first, fall back to mcp_params.json
+            params_file = getattr(self.options, "params_file", None)
+            if not params_file:
+                params_file = os.path.join(tempfile.gettempdir(), "mcp_params.json")
+
             if not os.path.exists(params_file):
                 response = {
                     "status": "error",
@@ -254,11 +256,14 @@ class ElementCreator(inkex.EffectExtension):
                 )
                 return
 
-            with open(params_file, "r") as f:
+            with open(params_file, "r", encoding="utf-8") as f:
                 element_data = json.load(f)
 
             # Clean up the params file after reading (like original system)
-            os.remove(params_file)
+            try:
+                os.remove(params_file)
+            except OSError:
+                pass
 
             tag = element_data.get("tag", "")
 

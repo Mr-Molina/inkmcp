@@ -10,6 +10,7 @@ import json
 import tempfile
 from unittest.mock import MagicMock, patch
 import pytest
+from inkmcp.backends import DBusBackend
 from inkmcp.inkscape_mcp_server import (
     format_response,
     InkscapeConnection,
@@ -104,7 +105,7 @@ class TestExecuteOperationResponseHandling:
             resp_path = tf.name
 
         try:
-            conn = InkscapeConnection()
+            conn = InkscapeConnection(backend=DBusBackend())
             res = conn.execute_operation({"response_file": resp_path})
             assert res["status"] == "success"
             assert res["data"]["id"] == "circle_1"
@@ -123,7 +124,7 @@ class TestExecuteOperationResponseHandling:
             resp_path = tf.name
 
         try:
-            conn = InkscapeConnection()
+            conn = InkscapeConnection(backend=DBusBackend())
             res = conn.execute_operation({"response_file": resp_path})
             # Should return error status indicating response file error
             assert res["status"] == "error"
@@ -142,8 +143,149 @@ class TestExecuteOperationResponseHandling:
         if os.path.exists(non_existent_file):
             os.unlink(non_existent_file)
 
-        conn = InkscapeConnection()
+        conn = InkscapeConnection(backend=DBusBackend())
         res = conn.execute_operation({"response_file": non_existent_file})
         # Verify execute_operation returns a structured response without crashing
         assert "status" in res
         assert "data" in res
+
+
+def test_inkscape_connection_selects_windows_backend():
+    from inkmcp.inkscape_mcp_server import InkscapeConnection
+    with patch("inkmcp.inkscape_mcp_server.get_operating_system", return_value="windows"), \
+         patch("inkmcp.inkscape_mcp_server.is_inkscape_process_running", return_value=True), \
+         patch("inkmcp.backends.windows_cli.WindowsCliBackend.is_available", return_value=True):
+        conn = InkscapeConnection()
+        assert conn.backend.get_backend_name() == "windows_cli"
+
+
+def test_inkscape_connection_selects_headless_when_no_gui():
+    from inkmcp.inkscape_mcp_server import InkscapeConnection
+    with patch("inkmcp.inkscape_mcp_server.get_operating_system", return_value="windows"), \
+         patch("inkmcp.inkscape_mcp_server.is_inkscape_process_running", return_value=False):
+        conn = InkscapeConnection(allow_headless=True)
+        assert conn.backend.get_backend_name() == "headless"
+
+
+def test_inkscape_connection_selects_dbus_backend():
+    from inkmcp.inkscape_mcp_server import InkscapeConnection
+    with patch("inkmcp.inkscape_mcp_server.get_operating_system", return_value="linux"), \
+         patch("inkmcp.backends.dbus.DBusBackend.is_available", return_value=True):
+        conn = InkscapeConnection()
+        assert conn.backend.get_backend_name() == "dbus"
+
+
+def test_inkscape_connection_selects_headless_on_linux_when_no_dbus():
+    from inkmcp.inkscape_mcp_server import InkscapeConnection
+    with patch("inkmcp.inkscape_mcp_server.get_operating_system", return_value="linux"), \
+         patch("inkmcp.backends.dbus.DBusBackend.is_available", return_value=False):
+        conn = InkscapeConnection(allow_headless=True)
+        assert conn.backend.get_backend_name() == "headless"
+
+
+def test_inkscape_connection_none_backend_when_no_gui_and_no_headless():
+    from inkmcp.inkscape_mcp_server import InkscapeConnection
+    with patch("inkmcp.inkscape_mcp_server.get_operating_system", return_value="windows"), \
+         patch("inkmcp.inkscape_mcp_server.is_inkscape_process_running", return_value=False):
+        conn = InkscapeConnection(allow_headless=False)
+        assert conn.backend is None
+        assert conn.is_available() is False
+        res = conn.execute_operation({"operation": "get_info"})
+        assert res["status"] == "error"
+        assert "No Inkscape backend available" in res["data"]["error"]
+
+
+def test_inkscape_client_delegates_to_connection():
+    from inkmcp.inkmcpcli import InkscapeClient
+    with patch("inkmcp.inkscape_mcp_server.InkscapeConnection.execute_operation") as mock_exec:
+        mock_exec.return_value = {"status": "success", "data": {"id": "circle_1", "message": "created"}}
+        client = InkscapeClient()
+        res = client.execute_operation({"tag": "circle"})
+        assert res["success"] is True
+        assert res["response"]["data"]["id"] == "circle_1"
+
+
+def test_inkscape_client_handles_error():
+    from inkmcp.inkmcpcli import InkscapeClient
+    with patch("inkmcp.inkscape_mcp_server.InkscapeConnection.execute_operation") as mock_exec:
+        mock_exec.return_value = {"status": "error", "data": {"error": "Connection failed"}}
+        client = InkscapeClient()
+        res = client.execute_operation({"tag": "circle"})
+        assert res["success"] is False
+        assert res["error"] == "Connection failed"
+
+
+def test_element_creator_params_file_argument():
+    import argparse
+    from inkscape_mcp import ElementCreator
+
+    creator = ElementCreator()
+    parser = argparse.ArgumentParser()
+    creator.add_arguments(parser)
+    args = parser.parse_args(["--params-file", "test_params.json"])
+    assert args.params_file == "test_params.json"
+
+
+def test_element_creator_effect_reads_custom_params_file():
+    from inkscape_mcp import ElementCreator
+    import inkex
+
+    # Create a custom params file
+    with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as tf:
+        json.dump(
+            {
+                "tag": "circle",
+                "attributes": {
+                    "cx": "50",
+                    "cy": "50",
+                    "r": "25",
+                    "id": "custom_circle",
+                },
+            },
+            tf,
+        )
+        params_path = tf.name
+
+    try:
+        creator = ElementCreator()
+        creator.options = MagicMock()
+        creator.options.params_file = params_path
+        creator.svg = inkex.load_svg(
+            '<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100">'
+            '<g id="layer1"/>'
+            '</svg>'
+        ).getroot()
+
+        creator.effect()
+        # The custom params file should have been read and removed
+        assert not os.path.exists(params_path)
+        # Check that the element was added to the svg
+        circle = creator.svg.find(".//*[@id='custom_circle']")
+        assert circle is not None
+    finally:
+        if os.path.exists(params_path):
+            os.unlink(params_path)
+
+
+def test_dbus_backend_is_available():
+    from inkmcp.backends.dbus import DBusBackend
+
+    # 1. When gdbus not found
+    with patch("shutil.which", return_value=None):
+        backend = DBusBackend()
+        assert backend.is_available() is False
+
+    # 2. When gdbus call succeeds and action is present
+    with patch("shutil.which", return_value="/usr/bin/gdbus"), \
+         patch("subprocess.run", return_value=MagicMock(returncode=0, stdout="['org.khema.inkscape.mcp', 'other']")):
+        backend = DBusBackend()
+        assert backend.is_available() is True
+        assert backend.get_backend_name() == "dbus"
+
+    # 3. When gdbus call returns error
+    with patch("shutil.which", return_value="/usr/bin/gdbus"), \
+         patch("subprocess.run", return_value=MagicMock(returncode=1, stdout="", stderr="Error")):
+        backend = DBusBackend()
+        assert backend.is_available() is False
+
+

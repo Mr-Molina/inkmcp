@@ -21,6 +21,14 @@ from typing import Any, AsyncIterator, Dict, Optional, Union
 from mcp.server.fastmcp import FastMCP, Context
 from mcp.types import ImageContent
 
+from inkmcp.platform_utils import get_operating_system, is_inkscape_process_running
+from inkmcp.backends import (
+    InkscapeBackend,
+    DBusBackend,
+    HeadlessSvgBackend,
+    WindowsCliBackend,
+)
+
 # Configure logging
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
@@ -35,139 +43,69 @@ DEFAULT_ACTION_NAME = "org.khema.inkscape.mcp"
 
 
 class InkscapeConnection:
-    """Manages D-Bus connection to Inkscape"""
+    """Manages connection to Inkscape with automatic cross-platform backend dispatching."""
 
-    def __init__(self):
+    def __init__(
+        self,
+        backend: Optional[InkscapeBackend] = None,
+        allow_headless: bool = False,
+    ):
         self.dbus_service = DEFAULT_DBUS_SERVICE
         self.dbus_path = DEFAULT_DBUS_PATH
         self.dbus_interface = DEFAULT_DBUS_INTERFACE
         self.action_name = DEFAULT_ACTION_NAME
         self._client_path = Path(__file__).parent / "inkmcpcli.py"
 
+        if backend is not None:
+            self.backend: Optional[InkscapeBackend] = backend
+        else:
+            self.backend = self._select_backend(allow_headless=allow_headless)
+
+    def _select_backend(self, allow_headless: bool = False) -> Optional[InkscapeBackend]:
+        """Automatically select backend based on platform and availability."""
+        os_name = get_operating_system()
+        if os_name == "windows":
+            if is_inkscape_process_running():
+                cli_backend = WindowsCliBackend()
+                if cli_backend.is_available():
+                    return cli_backend
+            if allow_headless:
+                return HeadlessSvgBackend()
+            return None
+        else:
+            # Linux / Unix / macOS
+            dbus_backend = DBusBackend(
+                dbus_service=self.dbus_service,
+                dbus_path=self.dbus_path,
+                dbus_interface=self.dbus_interface,
+                action_name=self.action_name,
+            )
+            if dbus_backend.is_available():
+                return dbus_backend
+            if allow_headless:
+                return HeadlessSvgBackend()
+            return None
+
     def is_available(self) -> bool:
-        """Check if Inkscape is running and MCP extension is available"""
-        if not shutil.which("gdbus"):
-            logger.warning("gdbus executable not found in system PATH")
+        """Check if selected backend is available."""
+        if self.backend is None:
             return False
-
-        try:
-            cmd = [
-                "gdbus",
-                "call",
-                "--session",
-                "--dest",
-                self.dbus_service,
-                "--object-path",
-                self.dbus_path,
-                "--method",
-                f"{self.dbus_interface}.List",
-            ]
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
-
-            if result.returncode != 0:
-                logger.warning("Inkscape D-Bus service not available")
-                return False
-
-            # Check if our generic MCP extension action is listed
-            output = result.stdout
-            return self.action_name in output
-
-        except Exception as e:
-            logger.error(f"Error checking Inkscape availability: {e}")
-            return False
+        return self.backend.is_available()
 
     def execute_operation(self, operation_data: Dict[str, Any]) -> Dict[str, Any]:
-        """Execute operation using CLI client"""
-        params_file = None
-        try:
-            # Write operation data to temporary file
-            params_fd, params_file = tempfile.mkstemp(
-                suffix=".json", prefix="inkmcp_params_"
-            )
-            with os.fdopen(params_fd, "w") as f:
-                json.dump(operation_data, f)
-
-            # Execute via D-Bus
-            cmd = [
-                "gdbus",
-                "call",
-                "--session",
-                "--dest",
-                self.dbus_service,
-                "--object-path",
-                self.dbus_path,
-                "--method",
-                f"{self.dbus_interface}.Activate",
-                self.action_name,
-                f"[<'{params_file}'>]",
-                "{}",
-            ]
-
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
-
-            if result.returncode != 0:
-                logger.error(f"D-Bus command failed: {result.stderr}")
-                return {
-                    "status": "error",
-                    "data": {"error": f"D-Bus call failed: {result.stderr}"},
-                }
-
-            # Read response from response file
-            response_file = operation_data.get("response_file")
-            if response_file:
-                # Validate response_file realpath resides strictly inside tempfile.gettempdir()
-                temp_dir = os.path.realpath(tempfile.gettempdir())
-                resp_real = os.path.realpath(response_file)
-                try:
-                    is_safe = (
-                        os.path.commonpath([temp_dir, resp_real]) == temp_dir
-                        and resp_real != temp_dir
+        """Execute operation using selected backend."""
+        if self.backend is None:
+            return {
+                "status": "error",
+                "data": {
+                    "error": (
+                        "No Inkscape backend available. Ensure Inkscape is running with the "
+                        "generic MCP extension installed, or enable headless mode."
                     )
-                except (ValueError, TypeError):
-                    is_safe = False
+                },
+            }
+        return self.backend.execute_operation(operation_data)
 
-                if not is_safe:
-                    logger.error(f"Response file path outside temp directory: {response_file}")
-                    return {
-                        "status": "error",
-                        "data": {"error": f"Response file error: Path outside temp directory: {response_file}"},
-                    }
-
-                # Verify response file exists and has non-zero size
-                if not os.path.exists(resp_real) or os.path.getsize(resp_real) == 0:
-                    logger.error(f"Response file missing or empty: {response_file}")
-                    return {
-                        "status": "error",
-                        "data": {"error": "Response file error: Extension failed to produce output (file missing or empty)"},
-                    }
-
-                try:
-                    with open(resp_real, "r") as f:
-                        response_data = json.load(f)
-                    os.remove(resp_real)  # Clean up
-                    return response_data
-                except Exception as e:
-                    logger.error(f"Failed to read response file: {e}")
-                    return {
-                        "status": "error",
-                        "data": {"error": f"Response file error: {e}"},
-                    }
-            else:
-                # Assume success if no response file specified
-                return {"status": "success", "data": {"message": "Operation completed"}}
-
-        except subprocess.TimeoutExpired:
-            logger.error("Operation timed out")
-            return {"status": "error", "data": {"error": "Operation timed out"}}
-        except Exception as e:
-            logger.error(f"Operation execution error: {e}")
-            return {"status": "error", "data": {"error": str(e)}}
-        finally:
-            if params_file and os.path.exists(params_file):
-                try:
-                    os.remove(params_file)
-                except OSError:
-                    pass
 
 
 # Global connection instance

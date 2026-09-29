@@ -624,54 +624,18 @@ class InkscapeClient:
         return result if result is not None else {"tag": tag, "attributes": {}}
 
     def execute_operation(self, element_data: Dict[str, Any]) -> Dict[str, Any]:
-        """Execute operation via D-Bus"""
-        params_file = None
-        response_file = None
+        """Execute operation via InkscapeConnection dispatcher"""
         try:
-            # Create temporary response file for reverse communication
-            response_fd, response_file = tempfile.mkstemp(suffix='.json', prefix='inkmcp_response_')
-            os.close(response_fd)  # Close the file descriptor, we just need the path
-            element_data['response_file'] = response_file
+            from inkmcp.inkscape_mcp_server import InkscapeConnection
 
-            # Write parameters to unique JSON file
-            params_fd, params_file = tempfile.mkstemp(suffix='.json', prefix='inkmcp_params_')
-            with os.fdopen(params_fd, 'w') as f:
-                json.dump(element_data, f)
+            conn = InkscapeConnection()
+            result = conn.execute_operation(element_data)
 
-            # Execute D-Bus command
-            cmd = [
-                "gdbus", "call",
-                "--session",
-                "--dest", self.dbus_service,
-                "--object-path", self.dbus_path,
-                "--method", f"{self.dbus_interface}.Activate",
-                self.action_name,
-                f"[<'{params_file}'>]", "{}"
-            ]
-
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
-
-            if result.returncode != 0:
-                return {
-                    "success": False,
-                    "error": f"D-Bus command failed: {result.stderr}"
-                }
-
-            # Read response from response file
-            if response_file and os.path.exists(response_file):
-                try:
-                    with open(response_file, 'r') as f:
-                        response = json.load(f)
-                    os.remove(response_file)
-                    return {"success": True, "response": response}
-                except Exception as e:
-                    return {
-                        "success": False,
-                        "error": f"Failed to read response: {str(e)}"
-                    }
-
-            return {"success": True, "output": result.stdout}
-
+            if result.get("status") == "success":
+                return {"success": True, "response": result}
+            else:
+                error = result.get("data", {}).get("error", "Unknown error")
+                return {"success": False, "error": error, "response": result}
         except subprocess.TimeoutExpired:
             return {
                 "success": False,
@@ -682,17 +646,6 @@ class InkscapeClient:
                 "success": False,
                 "error": f"Execution failed: {str(e)}"
             }
-        finally:
-            if params_file and os.path.exists(params_file):
-                try:
-                    os.unlink(params_file)
-                except OSError:
-                    pass
-            if response_file and os.path.exists(response_file):
-                try:
-                    os.unlink(response_file)
-                except OSError:
-                    pass
 
     def execute_command(self, element_data: Dict[str, Any]) -> Dict[str, Any]:
         """Execute command via D-Bus (alias for execute_operation)"""
