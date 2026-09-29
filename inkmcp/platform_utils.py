@@ -43,6 +43,7 @@ def _query_windows_registry() -> Optional[Path]:
                 ) as key:
                     val, _ = winreg.QueryValueEx(key, "")
                     if val:
+                        val = val.strip('" ')
                         exe_path = Path(val)
                         com_path = exe_path.with_name("inkscape.com")
                         if com_path.is_file():
@@ -58,6 +59,7 @@ def _query_windows_registry() -> Optional[Path]:
                 with winreg.OpenKey(hkey, r"SOFTWARE\Inkscape\Inkscape") as key:
                     install_dir, _ = winreg.QueryValueEx(key, "InstallDir")
                     if install_dir:
+                        install_dir = install_dir.strip('" ')
                         com_candidate = Path(install_dir) / "bin" / "inkscape.com"
                         if com_candidate.is_file():
                             return com_candidate

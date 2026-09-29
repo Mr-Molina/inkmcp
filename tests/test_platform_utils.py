@@ -11,6 +11,7 @@ from inkmcp.platform_utils import (
     get_inkscape_extensions_dir,
     is_extension_installed,
     is_inkscape_process_running,
+    _query_windows_registry,
 )
 
 
@@ -54,6 +55,18 @@ def test_find_inkscape_executable_prefers_com_over_exe():
         assert str(exe).endswith("inkscape.com")
 
 
+def test_find_inkscape_executable_registry_fallback():
+    candidate = Path(r"C:\Program Files\Inkscape\bin\inkscape.com")
+    with patch("sys.platform", "win32"), \
+         patch.dict(os.environ, {"INKSCAPE_PATH": ""}, clear=False), \
+         patch("shutil.which", return_value=None), \
+         patch("inkmcp.platform_utils._query_windows_registry", return_value=candidate) as mock_reg, \
+         patch.object(Path, "is_file", return_value=True):
+        exe = find_inkscape_executable()
+        assert exe == candidate
+        mock_reg.assert_called_once()
+
+
 def test_get_inkscape_extensions_dir_windows(tmp_path):
     with patch("sys.platform", "win32"), \
          patch.dict(os.environ, {"APPDATA": str(tmp_path)}):
@@ -63,9 +76,18 @@ def test_get_inkscape_extensions_dir_windows(tmp_path):
 
 def test_get_inkscape_extensions_dir_linux(tmp_path):
     with patch("sys.platform", "linux"), \
+         patch.dict(os.environ, {"XDG_CONFIG_HOME": ""}), \
          patch("pathlib.Path.home", return_value=tmp_path):
         ext_dir = get_inkscape_extensions_dir()
         assert ext_dir == tmp_path / ".config" / "inkscape" / "extensions"
+
+
+def test_get_inkscape_extensions_dir_linux_custom_xdg(tmp_path):
+    custom_xdg = tmp_path / "custom_config"
+    with patch("sys.platform", "linux"), \
+         patch.dict(os.environ, {"XDG_CONFIG_HOME": str(custom_xdg)}):
+        ext_dir = get_inkscape_extensions_dir()
+        assert ext_dir == custom_xdg / "inkscape" / "extensions"
 
 
 def test_is_extension_installed(tmp_path):
@@ -85,3 +107,21 @@ def test_is_inkscape_process_running_mock():
 
         mock_run.return_value = MagicMock(returncode=1, stdout="")
         assert is_inkscape_process_running() is False
+
+
+def test_query_windows_registry_strips_quotes(tmp_path):
+    fake_exe = tmp_path / "inkscape.exe"
+    fake_exe.touch()
+    fake_com = tmp_path / "inkscape.com"
+    fake_com.touch()
+
+    mock_winreg = MagicMock()
+    mock_winreg.HKEY_LOCAL_MACHINE = 1
+    mock_winreg.HKEY_CURRENT_USER = 2
+    mock_winreg.OpenKey.return_value.__enter__.return_value = MagicMock()
+    mock_winreg.QueryValueEx.return_value = (f'"{fake_exe}" ', 1)
+
+    with patch("sys.platform", "win32"), \
+         patch.dict(sys.modules, {"winreg": mock_winreg}):
+        res = _query_windows_registry()
+        assert res == fake_com
