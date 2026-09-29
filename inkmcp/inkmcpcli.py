@@ -74,7 +74,13 @@ import re
 import io
 import tokenize
 import builtins
+from pathlib import Path
 from typing import Dict, List, Any
+
+# Ensure repository root is on sys.path for standalone script execution
+_parent_dir = str(Path(__file__).resolve().parent.parent)
+if _parent_dir not in sys.path:
+    sys.path.insert(0, _parent_dir)
 
 
 def strip_python_comments(code: str) -> str:
@@ -631,7 +637,7 @@ class InkscapeClient:
             except ImportError:
                 from inkscape_mcp_server import InkscapeConnection
 
-            conn = InkscapeConnection()
+            conn = InkscapeConnection(allow_headless=True)
             result = conn.execute_operation(element_data)
 
             if result.get("status") == "success":

@@ -237,6 +237,15 @@ class WindowsCliBackend(InkscapeBackend):
                             },
                         }
 
+                    stdout_str = (result.stdout or "").strip()
+                    if "No active desktop to run" in stdout_str:
+                        return {
+                            "status": "error",
+                            "data": {
+                                "error": "Inkscape is running, but no active document is open. Please open or create a document in Inkscape."
+                            },
+                        }
+
                     # 4. Validate response_file realpath resides strictly inside tempfile.gettempdir()
                     temp_dir = os.path.realpath(tempfile.gettempdir())
                     resp_real = os.path.realpath(response_file)

@@ -122,16 +122,16 @@ class InkscapeConnection:
 _inkscape_connection: Optional[InkscapeConnection] = None
 
 
-def get_inkscape_connection() -> InkscapeConnection:
+def get_inkscape_connection(allow_headless: bool = False) -> InkscapeConnection:
     """Get or create Inkscape connection"""
     global _inkscape_connection
 
     if _inkscape_connection is None:
-        _inkscape_connection = InkscapeConnection()
+        _inkscape_connection = InkscapeConnection(allow_headless=allow_headless)
 
     if not _inkscape_connection.is_available():
         # Re-attempt connection before raising
-        _inkscape_connection = InkscapeConnection()
+        _inkscape_connection = InkscapeConnection(allow_headless=allow_headless)
         if not _inkscape_connection.is_available():
             raise Exception(
                 "Inkscape is not running or generic MCP extension is not available. "
