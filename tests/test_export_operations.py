@@ -135,3 +135,56 @@ class TestExportOperationsTempfileCleanup:
                 assert not os.path.exists(captured_temp_svg), "Temporary SVG leaked on error"
             if captured_output_png:
                 assert not os.path.exists(captured_output_png), "Temporary output file leaked on error"
+
+
+class TestExportOperationsExecutableResolution:
+    """Tests verifying find_inkscape_executable() resolution and fallback in export_document_image."""
+
+    def test_export_document_image_uses_custom_executable(self):
+        """Verify find_inkscape_executable() return value is passed to call()."""
+        mock_ext = MagicMock()
+        mock_svg = MagicMock()
+        mock_svg.get.return_value = "200px"
+
+        custom_exe = "C:\\Program Files\\Inkscape\\bin\\inkscape.com"
+        with patch("inkmcp.inkmcpops.export_operations.find_inkscape_executable", return_value=custom_exe), \
+             patch("inkmcp.inkmcpops.export_operations.call") as mock_call:
+            def fake_call(*args, **kwargs):
+                for arg in args:
+                    if isinstance(arg, str) and arg.startswith("--export-filename="):
+                        filepath = arg.split("=", 1)[1]
+                        with open(filepath, "wb") as f:
+                            f.write(b"\x89PNG\r\n\x1a\nfake_png_data")
+
+            mock_call.side_effect = fake_call
+            res = export_document_image(mock_ext, mock_svg, {"format": "png"})
+            assert res["status"] == "success"
+            assert mock_call.call_args[0][0] == custom_exe
+
+            export_path = res.get("data", {}).get("export_path")
+            if export_path and os.path.exists(export_path):
+                os.unlink(export_path)
+
+    def test_export_document_image_fallback_when_executable_none(self):
+        """Verify fallback to 'inkscape' when find_inkscape_executable() returns None."""
+        mock_ext = MagicMock()
+        mock_svg = MagicMock()
+        mock_svg.get.return_value = "200px"
+
+        with patch("inkmcp.inkmcpops.export_operations.find_inkscape_executable", return_value=None), \
+             patch("inkmcp.inkmcpops.export_operations.call") as mock_call:
+            def fake_call(*args, **kwargs):
+                for arg in args:
+                    if isinstance(arg, str) and arg.startswith("--export-filename="):
+                        filepath = arg.split("=", 1)[1]
+                        with open(filepath, "wb") as f:
+                            f.write(b"\x89PNG\r\n\x1a\nfake_png_data")
+
+            mock_call.side_effect = fake_call
+            res = export_document_image(mock_ext, mock_svg, {"format": "png"})
+            assert res["status"] == "success"
+            assert mock_call.call_args[0][0] == "inkscape"
+
+            export_path = res.get("data", {}).get("export_path")
+            if export_path and os.path.exists(export_path):
+                os.unlink(export_path)

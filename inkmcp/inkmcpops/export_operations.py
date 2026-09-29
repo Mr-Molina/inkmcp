@@ -6,6 +6,7 @@ import os
 import re
 from typing import Dict, Any
 from inkex.command import call
+from inkmcp.platform_utils import find_inkscape_executable
 from .common import create_success_response, create_error_response
 
 UNIT_FACTORS = {
@@ -119,7 +120,8 @@ def export_document_image(extension_instance, svg, attributes: Dict[str, Any]) -
                 if max_size < width:
                     dpi = int((max_size / width) * 96)
 
-            call('inkscape',
+            inkscape_bin = str(find_inkscape_executable() or "inkscape")
+            call(inkscape_bin,
                  '--export-type=png',
                  f'--export-filename={output_path}',
                  f'--export-dpi={dpi}',

@@ -7,7 +7,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 import pytest
 
-from inkmcp.backends.windows_cli import WindowsCliBackend
+from inkmcp.backends.windows_cli import WindowsCliBackend, _ActionLock
 
 
 @pytest.fixture
@@ -146,3 +146,99 @@ def test_windows_cli_custom_inkscape_path(mock_platform):
         res = backend.execute_operation({"operation": "get_info"})
         assert res["status"] == "success"
         assert str(custom_path) in captured_cmds[0]
+
+
+def test_action_lock_acquire_and_release(tmp_path):
+    """Test exclusive lock acquire, contention timeout, and subsequent acquisition after release."""
+    lock_file = str(tmp_path / "test.lock")
+    lock1 = _ActionLock(lock_path=lock_file, timeout=0.1, poll_interval=0.01)
+    lock2 = _ActionLock(lock_path=lock_file, timeout=0.05, poll_interval=0.01)
+
+    assert lock1.acquire() is True
+    # lock2 should time out waiting for lock1
+    with pytest.raises(TimeoutError, match="Timed out"):
+        lock2.acquire()
+
+    lock1.release()
+    # Now lock2 can be acquired
+    assert lock2.acquire() is True
+    lock2.release()
+
+
+def test_action_lock_context_manager(tmp_path):
+    """Test _ActionLock as context manager properly acquires and releases lock."""
+    lock_file = str(tmp_path / "test_cm.lock")
+    with _ActionLock(lock_path=lock_file, timeout=0.1):
+        lock2 = _ActionLock(lock_path=lock_file, timeout=0.05, poll_interval=0.01)
+        with pytest.raises(TimeoutError):
+            lock2.acquire()
+
+    with _ActionLock(lock_path=lock_file, timeout=0.1):
+        pass
+
+
+def test_action_lock_fallback_mode_without_msvcrt(tmp_path):
+    """Test fallback atomic file lock mode when msvcrt is not available."""
+    lock_file = str(tmp_path / "fallback.lock")
+    with patch("inkmcp.backends.windows_cli.msvcrt", None):
+        lock1 = _ActionLock(lock_path=lock_file, timeout=0.1, poll_interval=0.01)
+        lock2 = _ActionLock(lock_path=lock_file, timeout=0.05, poll_interval=0.01)
+
+        assert lock1.acquire() is True
+        assert os.path.exists(lock_file)
+
+        with pytest.raises(TimeoutError):
+            lock2.acquire()
+
+        lock1.release()
+        assert not os.path.exists(lock_file)
+
+        assert lock2.acquire() is True
+        lock2.release()
+
+
+def test_windows_cli_execute_operation_lock_held_during_run(mock_platform, tmp_path):
+    """Verify lock is actively held during execute_operation so concurrent calls cannot collide."""
+    lock_file = str(tmp_path / "action.lock")
+    backend = WindowsCliBackend(lock_path=lock_file, lock_timeout=0.5)
+
+    lock_was_held = False
+
+    def fake_subprocess_run(cmd, capture_output=True, text=True, timeout=30):
+        nonlocal lock_was_held
+        test_lock = _ActionLock(lock_path=lock_file, timeout=0.05, poll_interval=0.01)
+        try:
+            test_lock.acquire()
+            lock_was_held = False
+            test_lock.release()
+        except TimeoutError:
+            lock_was_held = True
+
+        temp_dir = tempfile.gettempdir()
+        params_file = os.path.join(temp_dir, "mcp_params.json")
+        with open(params_file, "r") as pf:
+            data = json.load(pf)
+        with open(data["response_file"], "w") as rf:
+            json.dump({"status": "success", "data": {"result": "ok"}}, rf)
+        return MagicMock(returncode=0, stdout="", stderr="")
+
+    with patch("subprocess.run", side_effect=fake_subprocess_run):
+        res = backend.execute_operation({"operation": "get_info"})
+        assert res["status"] == "success"
+        assert lock_was_held is True
+
+
+def test_windows_cli_execute_operation_lock_timeout(mock_platform, tmp_path):
+    """Verify backend handles lock acquisition timeout gracefully by returning error dict."""
+    lock_file = str(tmp_path / "timeout.lock")
+    backend = WindowsCliBackend(lock_path=lock_file, lock_timeout=0.05)
+
+    external_lock = _ActionLock(lock_path=lock_file, timeout=0.1)
+    external_lock.acquire()
+    try:
+        res = backend.execute_operation({"operation": "get_info"})
+        assert res["status"] == "error"
+        assert "lock timed out" in res["data"]["error"].lower()
+    finally:
+        external_lock.release()
+

@@ -7,7 +7,7 @@ Activates Python environment and launches the MCP server.
 param()
 
 $ErrorActionPreference = "Stop"
-$ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+$ScriptDir = $PSScriptRoot
 Set-Location -Path $ScriptDir
 
 # Ensure parent directory (repo root or extensions dir) is in PYTHONPATH for inkmcp package discovery
