@@ -125,3 +125,11 @@ def test_query_windows_registry_strips_quotes(tmp_path):
          patch.dict(sys.modules, {"winreg": mock_winreg}):
         res = _query_windows_registry()
         assert res == fake_com
+
+
+def test_launcher_scripts_exist():
+    repo_root = Path(__file__).parent.parent
+    assert (repo_root / "inkmcp" / "run_inkscape_mcp.ps1").is_file()
+    assert (repo_root / "inkmcp" / "run_inkscape_mcp.bat").is_file()
+    assert (repo_root / "install_extension.ps1").is_file()
+
