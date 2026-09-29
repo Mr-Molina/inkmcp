@@ -16,7 +16,6 @@ def mock_platform():
     with patch("inkmcp.backends.windows_cli.get_operating_system", return_value="windows"), \
          patch("inkmcp.backends.windows_cli.find_inkscape_executable", return_value=Path("C:/Program Files/Inkscape/bin/inkscape.com")), \
          patch("inkmcp.backends.windows_cli.is_extension_installed", return_value=True), \
-         patch("inkmcp.backends.windows_cli.is_inkscape_process_running", return_value=True), \
          patch.object(Path, "is_file", autospec=True, side_effect=lambda p: True if "inkscape" in str(p).lower() else orig_is_file(p)):
         yield
 
@@ -49,10 +48,20 @@ def test_windows_cli_execute_operation_success(mock_platform):
 
 def test_windows_cli_handles_inkscape_error(mock_platform):
     backend = WindowsCliBackend()
-    with patch("subprocess.run", return_value=MagicMock(returncode=1, stderr="Inkscape crashed")):
+    with patch("subprocess.run", return_value=MagicMock(returncode=1, stderr="Inkscape crashed", stdout="")):
         res = backend.execute_operation({"operation": "create", "tag": "circle"})
         assert res["status"] == "error"
         assert "Inkscape action execution failed" in res["data"]["error"]
+        assert "Inkscape crashed" in res["data"]["error"]
+
+
+def test_windows_cli_handles_inkscape_error_stdout_fallback(mock_platform):
+    backend = WindowsCliBackend()
+    with patch("subprocess.run", return_value=MagicMock(returncode=1, stderr="", stdout="Error logged on stdout")):
+        res = backend.execute_operation({"operation": "create", "tag": "circle"})
+        assert res["status"] == "error"
+        assert "Inkscape action execution failed" in res["data"]["error"]
+        assert "Error logged on stdout" in res["data"]["error"]
 
 
 def test_windows_cli_timeout_handling(mock_platform):
@@ -96,6 +105,15 @@ def test_windows_cli_missing_or_empty_response_file(mock_platform):
         res = backend.execute_operation({"operation": "create", "tag": "circle"})
         assert res["status"] == "error"
         assert "produced no response file" in res["data"]["error"]
+
+
+def test_windows_cli_rejects_response_file_outside_temp(mock_platform):
+    backend = WindowsCliBackend()
+    outside_path = os.path.abspath(r"C:\Windows\System32\evil_response.json") if os.name == "nt" else "/etc/evil_response.json"
+    with patch("subprocess.run", return_value=MagicMock(returncode=0, stdout="", stderr="")):
+        res = backend.execute_operation({"operation": "create", "response_file": outside_path})
+        assert res["status"] == "error"
+        assert "Response file error: Path outside temp directory" in res["data"]["error"]
 
 
 def test_windows_cli_unexpected_exception(mock_platform):
