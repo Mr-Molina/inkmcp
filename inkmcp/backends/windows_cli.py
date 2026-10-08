@@ -85,7 +85,10 @@ class _ActionLock:
                     try:
                         mtime = os.path.getmtime(self.lock_path)
                         if (time.time() - mtime) > (self.timeout + 10.0):
-                            os.remove(self.lock_path)
+                            try:
+                                os.remove(self.lock_path)
+                            except (FileNotFoundError, PermissionError, OSError):
+                                pass
                     except OSError:
                         pass
 
@@ -192,7 +195,7 @@ class WindowsCliBackend(InkscapeBackend):
             }
 
         response_file = operation_data.get("response_file")
-        params_file = os.path.join(tempfile.gettempdir(), "mcp_params.json")
+        params_file = None
         created_temp_response = False
         is_safe = False
 
@@ -210,7 +213,8 @@ class WindowsCliBackend(InkscapeBackend):
                     payload = dict(operation_data)
                     payload["response_file"] = response_file
 
-                    # 2. Write parameter file
+                    # 2. Write parameter file (canonical path expected by noprefs action)
+                    params_file = os.path.join(tempfile.gettempdir(), "mcp_params.json")
                     with open(params_file, "w", encoding="utf-8") as pf:
                         json.dump(payload, pf)
 
@@ -283,7 +287,7 @@ class WindowsCliBackend(InkscapeBackend):
                             os.remove(response_file)
                         except OSError:
                             pass
-                    if os.path.exists(params_file):
+                    if params_file and os.path.exists(params_file):
                         try:
                             os.remove(params_file)
                         except OSError:
@@ -304,3 +308,13 @@ class WindowsCliBackend(InkscapeBackend):
         except Exception as e:
             logger.error("Windows CLI execution failed: %s", e)
             return {"status": "error", "data": {"error": str(e)}}
+
+    async def is_available_async(self) -> bool:
+        """Async-compatible wrapper for is_available to prevent event loop starvation."""
+        import asyncio
+        return await asyncio.to_thread(self.is_available)
+
+    async def execute_operation_async(self, operation_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Async-compatible wrapper for execute_operation to prevent event loop starvation."""
+        import asyncio
+        return await asyncio.to_thread(self.execute_operation, operation_data)

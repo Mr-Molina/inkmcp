@@ -30,7 +30,7 @@ def test_windows_cli_execute_operation_success(mock_platform):
     backend = WindowsCliBackend()
 
     def fake_subprocess_run(cmd, capture_output=True, text=True, timeout=30):
-        # Find response_file from mcp_params.json
+        # Find response_file from the unique params file
         temp_dir = tempfile.gettempdir()
         params_file = os.path.join(temp_dir, "mcp_params.json")
         with open(params_file, "r") as pf:

@@ -9,6 +9,7 @@ def create_success_response(message: str, **data) -> Dict[str, Any]:
     response_data.update(data)
     return {
         "status": "success",
+        "message": message,
         "data": response_data
     }
 
@@ -19,6 +20,7 @@ def create_error_response(error_message: str, **data) -> Dict[str, Any]:
     response_data.update(data)
     return {
         "status": "error",
+        "message": error_message,
         "data": response_data
     }
 

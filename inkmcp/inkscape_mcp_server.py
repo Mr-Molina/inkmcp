@@ -8,12 +8,14 @@ for SVG element creation, document manipulation, and code execution.
 """
 
 import asyncio
+import concurrent.futures
 import json
 import logging
 import os
 import shutil
 import subprocess
 import tempfile
+import threading
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, AsyncIterator, Dict, Optional, Union
@@ -120,25 +122,36 @@ class InkscapeConnection:
 
 # Global connection instance
 _inkscape_connection: Optional[InkscapeConnection] = None
+_connection_lock = threading.Lock()
+
+# Dedicated thread pool for Inkscape operations (Fix 5: avoid asyncio default pool starvation)
+_inkscape_executor = concurrent.futures.ThreadPoolExecutor(
+    max_workers=4, thread_name_prefix="inkscape"
+)
 
 
 def get_inkscape_connection(allow_headless: bool = False) -> InkscapeConnection:
     """Get or create Inkscape connection"""
     global _inkscape_connection
 
-    if _inkscape_connection is None:
-        _inkscape_connection = InkscapeConnection(allow_headless=allow_headless)
+    with _connection_lock:
+        if _inkscape_connection is not None and _inkscape_connection.allow_headless != allow_headless:
+            # allow_headless changed — recreate connection
+            _inkscape_connection = InkscapeConnection(allow_headless=allow_headless)
 
-    if not _inkscape_connection.is_available():
-        # Re-attempt connection before raising
-        _inkscape_connection = InkscapeConnection(allow_headless=allow_headless)
+        if _inkscape_connection is None:
+            _inkscape_connection = InkscapeConnection(allow_headless=allow_headless)
+
         if not _inkscape_connection.is_available():
-            raise Exception(
-                "Inkscape is not running or generic MCP extension is not available. "
-                "Please start Inkscape and ensure the generic MCP extension is installed."
-            )
+            # Re-attempt connection before raising
+            _inkscape_connection = InkscapeConnection(allow_headless=allow_headless)
+            if not _inkscape_connection.is_available():
+                raise Exception(
+                    "Inkscape is not running or generic MCP extension is not available. "
+                    "Please start Inkscape and ensure the generic MCP extension is installed."
+                )
 
-    return _inkscape_connection
+        return _inkscape_connection
 
 
 @asynccontextmanager
@@ -149,10 +162,10 @@ async def server_lifespan(server: FastMCP) -> AsyncIterator[Dict[str, Any]]:
     try:
         # Test connection on startup
         try:
-            await asyncio.to_thread(get_inkscape_connection)
+            await asyncio.get_event_loop().run_in_executor(_inkscape_executor, get_inkscape_connection)
             logger.info("Successfully connected to Inkscape on startup")
         except Exception as e:
-            logger.warning(f"Could not connect to Inkscape on startup: {e}")
+            logger.warning("Could not connect to Inkscape on startup: %s", e)
             logger.warning(
                 "Make sure Inkscape is running with the generic MCP extension before using tools"
             )
@@ -353,7 +366,8 @@ async def inkscape_operation(ctx: Context, command: str) -> Union[str, ImageCont
     """
     response_file = None
     try:
-        connection = await asyncio.to_thread(get_inkscape_connection)
+        loop = asyncio.get_event_loop()
+        connection = await loop.run_in_executor(_inkscape_executor, get_inkscape_connection)
 
         # Create unique response file for this operation
         response_fd, response_file = tempfile.mkstemp(
@@ -362,17 +376,20 @@ async def inkscape_operation(ctx: Context, command: str) -> Union[str, ImageCont
         os.close(response_fd)
 
         # Parse the command string using the same logic as our client
-        from inkmcpcli import parse_command_string
+        try:
+            from inkmcp.inkmcpcli import parse_command_string
+        except ImportError:
+            from inkmcpcli import parse_command_string
 
         parsed_data = parse_command_string(command)
 
         # Add response file to the operation data
         parsed_data["response_file"] = response_file
 
-        logger.info(f"Executing command: {command}")
-        logger.debug(f"Parsed data: {parsed_data}")
+        logger.info("Executing command: %s", command)
+        logger.debug("Parsed data: %s", parsed_data)
 
-        result = await asyncio.to_thread(connection.execute_operation, parsed_data)
+        result = await loop.run_in_executor(_inkscape_executor, connection.execute_operation, parsed_data)
 
         # Handle image export special case
         if (
@@ -388,11 +405,11 @@ async def inkscape_operation(ctx: Context, command: str) -> Union[str, ImageCont
         return format_response(result)
 
     except Exception as e:
-        logger.error(f"Error in inkscape_operation: {e}")
+        logger.error("Error in inkscape_operation: %s", e, exc_info=True)
         return f"❌ Operation failed: {str(e)}"
     finally:
         # Clean up response file if it exists
-        if response_file and os.path.exists(response_file):
+        if response_file:
             try:
                 temp_dir = os.path.realpath(tempfile.gettempdir())
                 resp_real = os.path.realpath(response_file)
@@ -401,7 +418,7 @@ async def inkscape_operation(ctx: Context, command: str) -> Union[str, ImageCont
                     and resp_real != temp_dir
                 ):
                     os.remove(response_file)
-            except OSError:
+            except (FileNotFoundError, OSError):
                 pass
 
 

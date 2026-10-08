@@ -97,6 +97,7 @@ class DBusBackend(InkscapeBackend):
                 json.dump(payload, f)
 
             # 3. Execute via D-Bus
+            safe_params = params_file.replace("'", "\\'")
             cmd = [
                 "gdbus",
                 "call",
@@ -108,7 +109,7 @@ class DBusBackend(InkscapeBackend):
                 "--method",
                 f"{self.dbus_interface}.Activate",
                 self.action_name,
-                f"[<'{params_file}'>]",
+                f"[<'{safe_params}'>]",
                 "{}",
             ]
 
@@ -167,3 +168,13 @@ class DBusBackend(InkscapeBackend):
                     os.remove(params_file)
                 except OSError:
                     pass
+
+    async def is_available_async(self) -> bool:
+        """Async-compatible wrapper for is_available to prevent event loop starvation."""
+        import asyncio
+        return await asyncio.to_thread(self.is_available)
+
+    async def execute_operation_async(self, operation_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Async-compatible wrapper for execute_operation to prevent event loop starvation."""
+        import asyncio
+        return await asyncio.to_thread(self.execute_operation, operation_data)

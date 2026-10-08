@@ -39,8 +39,8 @@ def _handle_remove_readonly(func, path, exc_info):
     try:
         os.chmod(path, stat.S_IWRITE)
         func(path)
-    except Exception:
-        pass
+    except (OSError, PermissionError) as e:
+        logger.warning("Failed to remove %s: %s", path, e)
 
 
 def _on_exc_remove_readonly(func, path, exc):
@@ -48,8 +48,8 @@ def _on_exc_remove_readonly(func, path, exc):
     try:
         os.chmod(path, stat.S_IWRITE)
         func(path)
-    except Exception:
-        pass
+    except (OSError, PermissionError) as e:
+        logger.warning("Failed to remove %s: %s", path, e)
 
 
 def check_extension_status(target_dir: Optional[Path] = None) -> bool:

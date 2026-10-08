@@ -1,0 +1,17 @@
+include LICENSE
+include README.md
+include pyproject.toml
+include inkscape_mcp.py
+include inkscape_mcp.inx
+recursive-include inkmcp *.py
+recursive-exclude tests *
+recursive-exclude examples *
+recursive-exclude .agents *
+recursive-exclude .superpowers *
+recursive-exclude .benchmarks *
+exclude *.png *.svg
+exclude test_hybrid.py testinkmcp.py
+exclude showcase_paces.py
+exclude focus_default_desktop.py launch_interactive.py
+exclude install_extension.ps1
+exclude blender_*.py

@@ -232,15 +232,31 @@ class ElementCreator(inkex.EffectExtension):
 
             with open(response_file_path, "w") as f:
                 json.dump(response_data, f)
-        except Exception:
+        except Exception as e:
             # Silent failure - avoid any output that could interfere with Inkscape
-            pass
+            import logging
+            logging.warning("Failed to write response file: %s", e)
 
     def effect(self):
         """Main extension entry point"""
+        import sys
         element_data = {}  # Initialize to avoid unbound variable
         params_file = getattr(self.options, "params_file", None)
+        
+        # If no params_file is specified, determine if we are running as an action
+        # Actions receive no custom arguments (often just the script and SVG file)
+        # If we have custom arguments (like --id), it's likely a standalone effect
+        has_custom_args = any(arg.startswith("--") for arg in sys.argv[1:])
         if not params_file:
+            if has_custom_args:
+                self.write_response(
+                    {
+                        "status": "error",
+                        "data": {"error": "No parameters file provided for standalone effect"},
+                    },
+                    os.path.join(tempfile.gettempdir(), "inkmcp_error_response.json"),
+                )
+                return
             params_file = os.path.join(tempfile.gettempdir(), "mcp_params.json")
 
         temp_dir = os.path.realpath(tempfile.gettempdir())
@@ -352,13 +368,14 @@ class ElementCreator(inkex.EffectExtension):
                 response_file = element_data.get("response_file")
                 if response_file:
                     self.write_response(error_response, response_file)
-            except Exception:
-                pass  # Silent error handling
+            except Exception as inner_e:
+                import logging
+                logging.warning("Failed to write error response: %s", inner_e)
         finally:
-            if params_file and is_safe and os.path.exists(params_real):
+            if params_file and is_safe:
                 try:
                     os.remove(params_real)
-                except OSError:
+                except (FileNotFoundError, OSError):
                     pass
 
 

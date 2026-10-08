@@ -43,7 +43,12 @@ class TestExportOperationsWidthParsing:
             mock_call.side_effect = fake_call
 
             res = export_document_image(mock_ext, mock_svg, {"format": "png", "max_size": 800})
-            assert res["status"] == "success", f"Export failed for width={width_val}: {res.get('data', {}).get('error')}"
+            export_path = res.get("data", {}).get("export_path")
+            try:
+                assert res["status"] == "success", f"Export failed for width={width_val}: {res.get('data', {}).get('error')}"
+            finally:
+                if export_path and os.path.exists(export_path):
+                    os.unlink(export_path)
 
     def test_export_document_image_viewbox_fallback(self):
         """Test fallback to viewBox when width attribute is missing or percentage."""
@@ -70,7 +75,12 @@ class TestExportOperationsWidthParsing:
             mock_call.side_effect = fake_call
 
             res = export_document_image(mock_ext, mock_svg, {"format": "png", "max_size": 512})
-            assert res["status"] == "success"
+            export_path = res.get("data", {}).get("export_path")
+            try:
+                assert res["status"] == "success"
+            finally:
+                if export_path and os.path.exists(export_path):
+                    os.unlink(export_path)
 
 
 class TestExportOperationsTempfileCleanup:
@@ -98,14 +108,15 @@ class TestExportOperationsTempfileCleanup:
             mock_call.side_effect = fake_call
 
             res = export_document_image(mock_ext, mock_svg, {"format": "png"})
-            assert res["status"] == "success"
-            assert captured_temp_svg is not None
-            assert not os.path.exists(captured_temp_svg), "Temporary SVG file was not unlinked on success"
-
-            # Clean up generated export_path
             export_path = res.get("data", {}).get("export_path")
-            if export_path and os.path.exists(export_path):
-                os.unlink(export_path)
+            try:
+                assert res["status"] == "success"
+                assert captured_temp_svg is not None
+                assert not os.path.exists(captured_temp_svg), "Temporary SVG file was not unlinked on success"
+            finally:
+                # Clean up generated export_path
+                if export_path and os.path.exists(export_path):
+                    os.unlink(export_path)
 
     def test_tempfile_cleanup_on_error(self):
         """Verify temporary files are deleted when Inkscape CLI call raises an error."""
@@ -158,12 +169,13 @@ class TestExportOperationsExecutableResolution:
 
             mock_call.side_effect = fake_call
             res = export_document_image(mock_ext, mock_svg, {"format": "png"})
-            assert res["status"] == "success"
-            assert mock_call.call_args[0][0] == custom_exe
-
             export_path = res.get("data", {}).get("export_path")
-            if export_path and os.path.exists(export_path):
-                os.unlink(export_path)
+            try:
+                assert res["status"] == "success"
+                assert mock_call.call_args[0][0] == custom_exe
+            finally:
+                if export_path and os.path.exists(export_path):
+                    os.unlink(export_path)
 
     def test_export_document_image_fallback_when_executable_none(self):
         """Verify fallback to 'inkscape' when find_inkscape_executable() returns None."""
@@ -182,9 +194,10 @@ class TestExportOperationsExecutableResolution:
 
             mock_call.side_effect = fake_call
             res = export_document_image(mock_ext, mock_svg, {"format": "png"})
-            assert res["status"] == "success"
-            assert mock_call.call_args[0][0] == "inkscape"
-
             export_path = res.get("data", {}).get("export_path")
-            if export_path and os.path.exists(export_path):
-                os.unlink(export_path)
+            try:
+                assert res["status"] == "success"
+                assert mock_call.call_args[0][0] == "inkscape"
+            finally:
+                if export_path and os.path.exists(export_path):
+                    os.unlink(export_path)

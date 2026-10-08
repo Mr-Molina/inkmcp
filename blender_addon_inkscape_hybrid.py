@@ -72,7 +72,7 @@ def serialize_variables(local_vars, exclude_names=None):
             continue
         
         type_name = type(value).__name__
-        if type_name in ('module', 'function', 'type', 'builtin_function_or_method', 'bpy_struct'):
+        if type_name in ('module', 'function', 'type', 'builtin_function_or_method', 'bpy_struct') or hasattr(value, 'bl_rna'):
             excluded.append((key, f"non-serializable type ({type_name})"))
             continue
         
@@ -102,8 +102,19 @@ def execute_inkscape_block(code, variables, inkmcp_cli_path):
             'variables': {}
         }
     
+    import os
+    if not os.path.exists(inkmcp_cli_path):
+        return {'success': False, 'error': f"CLI path does not exist: {inkmcp_cli_path}", 'variables': {}}
+    if not os.path.isfile(inkmcp_cli_path):
+        return {'success': False, 'error': f"CLI path is not a regular file: {inkmcp_cli_path}", 'variables': {}}
+    if not inkmcp_cli_path.endswith('.py'):
+        return {'success': False, 'error': f"CLI path must be a .py file: {inkmcp_cli_path}", 'variables': {}}
+    if os.path.basename(inkmcp_cli_path) != 'inkmcpcli.py':
+        return {'success': False, 'error': f"CLI path must be named inkmcpcli.py: {inkmcp_cli_path}", 'variables': {}}
+
     # PERF-003: Serialize variables with a structured json.loads bootstrap when present
     if variables:
+        variables = {k: v for k, v in variables.items() if k.isidentifier()}
         try:
             serialized_json = json.dumps(variables)
             var_injections = [
@@ -111,18 +122,21 @@ def execute_inkscape_block(code, variables, inkmcp_cli_path):
                 f"_inkmcp_vars = json.loads({json.dumps(serialized_json)})",
             ]
             for key in variables:
+                if not key.isidentifier(): continue
                 var_injections.append(f"{key} = _inkmcp_vars[{json.dumps(key)}]")
             var_injections.append("del _inkmcp_vars")
             full_code = '\n'.join(var_injections) + '\n' + code
         except Exception:
             var_injections = []
             for key, value in variables.items():
+                if not key.isidentifier(): continue
                 try:
                     repr_value = repr(value)
-                    if repr_value and repr_value != '':
+                    if repr_value and repr_value != '' and not repr_value.startswith('<'):
                         var_injections.append(f"{key} = {repr_value}")
-                except Exception:
-                    pass
+                except Exception as e:
+                    import logging
+                    logging.getLogger(__name__).warning("Variable '%s' dropped during serialization: %s", key, e)
             full_code = '\n'.join(var_injections) + '\n' + code if var_injections else code
     else:
         full_code = code
@@ -145,7 +159,7 @@ def execute_inkscape_block(code, variables, inkmcp_cli_path):
         finally:
             try:
                 os.unlink(temp_file)
-            except:
+            except OSError:
                 pass
         
         if result.returncode != 0:
@@ -258,19 +272,32 @@ class SCRIPT_OT_run_hybrid(Operator):
             if block_type == 'local':
                 try:
                     import io
+                    import ast
                     from contextlib import redirect_stdout
                     
-                    local_env = {
+                    parsed_ast = ast.parse(block_code)
+                    for node in ast.walk(parsed_ast):
+                        if isinstance(node, ast.Attribute) and node.attr in ('__subclasses__', '__globals__'):
+                            raise ValueError(f"Unsafe attribute access blocked: {node.attr}")
+                        if isinstance(node, ast.Import):
+                            for alias in node.names:
+                                if alias.name.split('.')[0] in ('os', 'sys', 'subprocess', 'shutil'):
+                                    raise ValueError(f"Unauthorized dangerous module import: {alias.name}")
+                        if isinstance(node, ast.ImportFrom):
+                            if node.module and node.module.split('.')[0] in ('os', 'sys', 'subprocess', 'shutil'):
+                                raise ValueError(f"Unauthorized dangerous module import: {node.module}")
+                    
+                    global_env = {
                         '__builtins__': __builtins__,
                         'bpy': bpy,
                         'C': bpy.context,
                         'D': bpy.data,
                     }
-                    local_env.update(shared_context)
+                    local_env = dict(shared_context)
                     
                     stdout_capture = io.StringIO()
                     with redirect_stdout(stdout_capture):
-                        exec(block_code, local_env)
+                        exec(block_code, global_env, local_env)
                     
                     output = stdout_capture.getvalue()
                     if output:
@@ -317,21 +344,27 @@ def register():
     bpy.types.TEXT_MT_text.append(menu_func)
     
     # Add keymap
-    wm = bpy.context.window_manager
-    kc = wm.keyconfigs.addon
-    if kc:
-        km = kc.keymaps.new(name='Text', space_type='TEXT_EDITOR')
-        kmi = km.keymap_items.new(SCRIPT_OT_run_hybrid.bl_idname, 'H', 'PRESS', ctrl=True, shift=True)
-        addon_keymaps.append((km, kmi))
+    try:
+        wm = bpy.context.window_manager
+        kc = wm.keyconfigs.addon
+        if kc:
+            km = kc.keymaps.new(name='Text', space_type='TEXT_EDITOR')
+            kmi = km.keymap_items.new(SCRIPT_OT_run_hybrid.bl_idname, 'H', 'PRESS', ctrl=True, shift=True)
+            addon_keymaps.append((km, kmi))
+    except AttributeError:
+        pass  # Keymap registration unavailable in background mode
 
 
 def unregister():
-    for km, kmi in addon_keymaps:
-        try:
-            km.keymap_items.remove(kmi)
-        except Exception:
-            pass
-    addon_keymaps.clear()
+    try:
+        for km, kmi in addon_keymaps:
+            try:
+                km.keymap_items.remove(kmi)
+            except Exception:
+                pass
+        addon_keymaps.clear()
+    except AttributeError:
+        pass  # Keymap cleanup unavailable in background mode
     
     try:
         bpy.types.TEXT_MT_text.remove(menu_func)

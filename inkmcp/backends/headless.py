@@ -63,8 +63,23 @@ class HeadlessSvgBackend(InkscapeBackend):
         return "headless"
 
     def execute_operation(self, operation_data: Dict[str, Any]) -> Dict[str, Any]:
-        op_type = operation_data.get("operation", "create")
+        tag = operation_data.get("tag", "")
+        op_type = operation_data.get("operation", "")
+
+        # Map tag values to operation types
+        tag_to_op = {
+            "execute-code": "execute_code",
+            "get-info": "get_info",
+            "export-document-image": "export_document_image",
+        }
+        if not op_type and tag in tag_to_op:
+            op_type = tag_to_op[tag]
+        elif not op_type:
+            op_type = "create"  # default
+
         svg_root = self._creator.svg
+        
+        backup_doc = copy.deepcopy(self._doc)
 
         try:
             if op_type == "create":
@@ -127,6 +142,9 @@ class HeadlessSvgBackend(InkscapeBackend):
                 }
 
         except Exception as e:
+            self._doc = backup_doc
+            self._creator.svg = self._doc.getroot()
+            self._creator.document = self._doc
             logger.error("Headless operation failed: %s", e)
             return {"status": "error", "data": {"error": str(e)}}
 

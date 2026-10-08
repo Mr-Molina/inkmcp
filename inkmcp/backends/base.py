@@ -20,3 +20,13 @@ class InkscapeBackend(ABC):
     def get_backend_name(self) -> str:
         """Return human-readable identifier for this backend."""
         pass
+
+    async def is_available_async(self) -> bool:
+        """Async-compatible wrapper for is_available to prevent event loop starvation."""
+        import asyncio
+        return await asyncio.to_thread(self.is_available)
+
+    async def execute_operation_async(self, operation_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Async-compatible wrapper for execute_operation to prevent event loop starvation."""
+        import asyncio
+        return await asyncio.to_thread(self.execute_operation, operation_data)

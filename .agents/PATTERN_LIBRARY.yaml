@@ -47,16 +47,16 @@ patterns:
     date: '2026-08-13'
     postmortem_ref: PM-2026-0813-003
 - id: GLB-004
-  name: PowerShell Inline Python Escaping
+  name: PowerShell Inline Python Escaping & Syntax Hardening
   failure_type: behavioral
   root_cause_category: powershell_escaping
   description: When executing inline python scripts (python -c) via run_command on
     Windows PowerShell, agents MUST NOT use f-strings containing internal single quotes.
     Agents MUST instead write Python code to a .py file and execute it.
-  escalation_level: 2
-  current_mitigation: 'mechanical_invariant — write to .py files, ban inline python
-    -c. Rule file: C:\Users\jmolina\.gemini\config\rules\python-scripts.md'
-  mitigation_target: C:\Users\jmolina\.gemini\config\rules\python-scripts.md
+  escalation_level: 3
+  current_mitigation: automation — Invariant 53 in INFRASTRUCTURE_INVARIANTS.md, powershell-syntax-hardening.md
+    rule, and validate_powershell_cmd.py validator
+  mitigation_target: C:\Users\jmolina\.gemini\config\rules\powershell-syntax-hardening.md
   occurrences:
   - session: conversation://411c5d3b-944c-4240-8f99-3eef88c7e5de
     date: '2026-08-13'
@@ -64,6 +64,9 @@ patterns:
   - session: conversation://d431852f-baba-4339-ab63-d07015404b7b
     date: '2026-08-14'
     postmortem_ref: PM-2026-0814-008
+  - session: conversation://8f8a2aca-c5ef-4e6b-b769-19fa6ad08cd0
+    date: '2026-09-29'
+    postmortem_ref: PM-2026-0929-004
 - id: GLB-005
   name: Evidence Before Assertions (Anti-Guessing)
   failure_type: behavioral
@@ -203,15 +206,105 @@ patterns:
   root_cause_category: ungrounded_entity_branding
   description: Agent fabricates plausible expansions for domain acronyms, organization
     titles, or network subnets during scaffolding or UI authoring instead of searching
-    workspace records or querying the user. Agents MUST verify institutional names against
-    repository ground truth before generating UI templates or documentation, and CI/deployment
-    gates MUST enforce automated regression testing against hallucinated entities.
+    workspace records or querying the user. Agents MUST verify institutional names
+    against repository ground truth before generating UI templates or documentation,
+    and CI/deployment gates MUST enforce automated regression testing against hallucinated
+    entities.
   escalation_level: 3
-  current_mitigation: 'automation — automated test gate (TestInstitutionalGroundTruth in
-    run_tests.py) & pre-deployment blocker in deploy_production.sh; mechanical invariant
-    in C:\Users\jmolina\.gemini\config\rules\ground-truth-entity-verification.md'
+  current_mitigation: automation — automated test gate (TestInstitutionalGroundTruth
+    in run_tests.py) & pre-deployment blocker in deploy_production.sh; mechanical
+    invariant in C:\Users\jmolina\.gemini\config\rules\ground-truth-entity-verification.md
   mitigation_target: C:\Users\jmolina\.gemini\config\rules\ground-truth-entity-verification.md
   occurrences:
   - session: conversation://8a779460-b3e0-4c18-972f-af0baecb5405
     date: '2026-09-10'
     postmortem_ref: PM-2026-0910-001
+- id: PRJ-001
+  name: Root Extension Script & Modular Package Disconnect
+  failure_type: build
+  root_cause_category: packaging_layout_mismatch
+  description: When maintaining hybrid extensions where scripts must reside at repo
+    root for host application discovery, package backends importing root scripts without
+    pyproject.toml py-modules declarations or sys.path fallbacks fail outside repo
+    root.
+  escalation_level: 1
+  current_mitigation: advisory — declare root modules in pyproject.toml py-modules
+    and add sys.path fallback resolution in package __init__.py
+  mitigation_target: s:/Github/inkmcp/.agents/PATTERN_LIBRARY.yaml
+  occurrences:
+  - session: conversation://8f8a2aca-c5ef-4e6b-b769-19fa6ad08cd0
+    date: '2026-09-29'
+    postmortem_ref: PM-2026-0929-002
+- id: WIN-DESKTOP-001
+  name: Windows Interactive Desktop Isolation, Window Inspection & Visibility Gate
+  failure_type: behavioral
+  root_cause_category: desktop_station_isolation
+  description: Windows execution environments run child processes on isolated desktop
+    objects (exebox-...), rendering GUI applications invisible on physical monitors.
+    Furthermore, .NET Process.MainWindowTitle and PowerShell Get-Process return empty
+    strings for GTK, Electron, Qt, and Blender windows even when fully visible. Agents
+    must route child GUI processes to WinSta0\Default, must never deduce invisibility
+    from empty MainWindowTitle, and must verify physical HWND visibility using Win32
+    EnumWindows or inspect_desktop_windows.py.
+  escalation_level: 3
+  current_mitigation: automation — Invariant 51 in INFRASTRUCTURE_INVARIANTS.md, launch_interactive.py
+    routing, inspect_desktop_windows.py inspection tool, and global rule windows-gui-desktop.md
+  mitigation_target: C:\Users\jmolina\.gemini\config\rules\windows-gui-desktop.md
+  occurrences:
+  - session: conversation://8f8a2aca-c5ef-4e6b-b769-19fa6ad08cd0
+    date: '2026-09-29'
+    postmortem_ref: PM-2026-0929-001
+  - session: conversation://8f8a2aca-c5ef-4e6b-b769-19fa6ad08cd0
+    date: '2026-09-29'
+    postmortem_ref: PM-2026-0929-005
+- id: WIN-ENC-001
+  name: Windows Subprocess Stdio Default cp1252 Decoding Collision
+  failure_type: logic
+  root_cause_category: windows_stdio_encoding
+  description: Windows subprocess.Popen(text=True) defaults to legacy cp1252 encoding
+    instead of UTF-8, crashing on multi-byte characters or emojis in tool outputs.
+    Agents must explicitly specify encoding="utf-8" and set PYTHONIOENCODING=utf-8.
+  escalation_level: 1
+  current_mitigation: advisory — pass encoding="utf-8" to all subprocess calls and
+    set PYTHONIOENCODING=utf-8 in environment
+  mitigation_target: C:\Users\jmolina\.gemini\config\pattern-library.yaml
+  occurrences:
+  - session: conversation://8f8a2aca-c5ef-4e6b-b769-19fa6ad08cd0
+    date: '2026-09-29'
+    postmortem_ref: PM-2026-0929-003
+- id: WIN-WIN-001
+  name: Fail-Safe Win32 Window Management & Process Scoping
+  failure_type: logic
+  root_cause_category: unbounded_os_window_manipulation
+  description: Unbounded Win32 EnumWindows scripts alter or maximize arbitrary OS
+    windows when target_pid is unverified or None, unhiding background system helpers
+    and blanking the user desktop. Agents must strictly require non-null PID validation,
+    filter out system classes, and bound affected windows.
+  escalation_level: 2
+  current_mitigation: mechanical_invariant — Invariant 52 in INFRASTRUCTURE_INVARIANTS.md
+    and global rule win32-window-safety.md
+  mitigation_target: C:\Users\jmolina\.gemini\config\rules\win32-window-safety.md
+  occurrences:
+  - session: conversation://8f8a2aca-c5ef-4e6b-b769-19fa6ad08cd0
+    date: '2026-09-29'
+    postmortem_ref: PM-2026-0929-004
+- id: GLB-014
+  name: Prohibition of Manual Coordinate Drawing for Vector Art (Anti-Hallucinated
+    Vector Synthesis)
+  failure_type: design
+  root_cause_category: manual_vector_coordinate_hallucination
+  description: 'Agents must never attempt to ''draw'' or ''illustrate'' complex organic
+    artwork, bevels, or casket perspective by hardcoding raw SVG Bézier coordinates
+    (M... C... Z) in Python or XML. Vector modifications must use deterministic operations:
+    Inkscape action commands (path-union, path-difference, path-break-apart), symmetry
+    transforms/mirroring of verified original geometry, or collaborative GUI handoff.
+
+    '
+  escalation_level: 2
+  current_mitigation: mechanical_invariant — Invariant 54 in INFRASTRUCTURE_INVARIANTS.md
+    and vector-art-authoring.md rule
+  mitigation_target: s:/Github/inkmcp/.agents/INFRASTRUCTURE_INVARIANTS.md
+  occurrences:
+  - session: conversation://762f0a11-c9a7-4945-ac4e-4eedd3f90773
+    date: '2026-09-29'
+    postmortem_ref: PM-2026-0929-006

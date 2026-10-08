@@ -59,8 +59,9 @@ def _parse_svg_width(svg) -> float:
                         vb_w = float(parts[2])
                         if vb_w > 0:
                             width = vb_w
-                    except (ValueError, TypeError):
-                        pass
+                    except (ValueError, TypeError) as e:
+                        import logging
+                        logging.warning(f"Failed to parse viewBox width: {e}")
 
         # Check get_viewbox() method if available
         if width is None and hasattr(svg, 'get_viewbox') and callable(svg.get_viewbox):
@@ -83,9 +84,13 @@ def export_document_image(extension_instance, svg, attributes: Dict[str, Any]) -
     temp_svg = None
     output_path = None
     success = False
+    return_base64 = False
+    ALLOWED_FORMATS = {"png", "svg", "pdf", "eps", "ps", "emf", "wmf", "xaml"}
     try:
         # Get export parameters
-        format_type = attributes.get('format', 'png')
+        format_type = str(attributes.get('format', 'png')).strip().lower().lstrip('.')
+        if format_type not in ALLOWED_FORMATS:
+            return create_error_response(f"Unsupported export format: {format_type}")
         max_size = int(attributes.get('max_size', 800))
         return_base64_val = attributes.get('return_base64', 'true')
         if isinstance(return_base64_val, bool):
@@ -105,31 +110,31 @@ def export_document_image(extension_instance, svg, attributes: Dict[str, Any]) -
             extension_instance.save(f)
 
         # Build export command
-        if format_type == 'png':
-            if area == 'page':
-                export_area = '--export-area-page'
-            elif area == 'drawing':
-                export_area = '--export-area-drawing'
-            else:
-                export_area = '--export-area-page'
+        if area == 'page':
+            export_area = '--export-area-page'
+        elif area == 'drawing':
+            export_area = '--export-area-drawing'
+        else:
+            export_area = '--export-area-page'
 
-            # Calculate DPI to respect max_size
-            dpi = 96  # Default
-            if max_size:
-                width = _parse_svg_width(svg)
-                if max_size < width:
-                    dpi = int((max_size / width) * 96)
+        # Calculate DPI to respect max_size
+        dpi = 96  # Default
+        if max_size:
+            width = _parse_svg_width(svg)
+            if max_size < width:
+                dpi = int((max_size / width) * 96)
 
-            inkscape_bin = str(find_inkscape_executable() or "inkscape")
+        inkscape_bin = str(find_inkscape_executable() or "inkscape")
+        try:
             call(inkscape_bin,
-                 '--export-type=png',
+                 f'--export-type={format_type}',
                  f'--export-filename={output_path}',
                  f'--export-dpi={dpi}',
                  export_area,
                  temp_svg,
                  timeout=30)
-        else:
-            return create_error_response(f"Unsupported format: {format_type}")
+        except Exception as e:
+            return create_error_response(f"Inkscape export failed: {e}")
 
         # Get file info
         file_size = os.path.getsize(output_path) if os.path.exists(output_path) else 0
@@ -155,13 +160,16 @@ def export_document_image(extension_instance, svg, attributes: Dict[str, Any]) -
     except Exception as e:
         return create_error_response(f"Export failed: {str(e)}")
     finally:
+        # Always clean up temp SVG
         if temp_svg and os.path.exists(temp_svg):
             try:
                 os.unlink(temp_svg)
             except OSError:
                 pass
-        if not success and output_path and os.path.exists(output_path):
-            try:
-                os.unlink(output_path)
-            except OSError:
-                pass
+        # Clean up output file when base64 was returned or on failure
+        if output_path and os.path.exists(output_path):
+            if not success or return_base64:
+                try:
+                    os.unlink(output_path)
+                except OSError:
+                    pass

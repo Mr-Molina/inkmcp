@@ -40,3 +40,14 @@ This document defines the multi-agent roles, responsibilities, and delegation st
 ### 9. Extension Certifier
 - **Primary Function**: Multi-layer verification and certification of network endpoints, directory mappings, and physical hardware status.
 - **Tools / Capabilities**: Physical layer probing, directory cross-referencing, read-back verification gates.
+
+## Mandatory Execution Standards
+
+### Windows PowerShell Syntax & Command Safety
+- **Shell Environment**: All commands run in `pwsh` (PowerShell) on Windows.
+- **Escape Character**: The escape character in PowerShell is the backtick (`` ` ``), NOT the backslash (`\`).
+- **Double Quote Escaping**: Double quotes inside double quotes MUST be escaped as `""` or ``` `" ``` — NEVER as `\"` (PowerShell treats `\"` as a literal backslash followed by a terminating double quote).
+- **Single Quotes**: Single quotes `'...'` are strictly literal. No variable interpolation (`$var`) or escape expansion occurs. To include a single quote inside single quotes, double it: `''`.
+- **Zero Inline Multi-Line Python**: Agents MUST NEVER execute `python -c "..."` containing multi-line code, dictionaries, f-strings, or nested quotes. Code MUST be written to a `.py` file first via file tools and executed with `python script.py`.
+- **Sensitive Special Characters**: Variables (`$`), command separators (`;`), redirection (`>`, `<`), pipelines (`|`), call operators (`&`), wildcards (`*`, `?`), and curly braces (`{}`) must be evaluated for shell expansion prior to execution.
+

@@ -72,8 +72,8 @@ def get_element_class(tag_name: str):
         potential_class = getattr(inkex, capitalized_name)
         if getattr(potential_class, '__name__', '') in ABSTRACT_ELEMENTS:
             return None
-        # Verify it's actually an element class (has Element in inheritance)
-        if hasattr(potential_class, '__mro__') and any('Element' in str(cls) for cls in potential_class.__mro__):
+        # Verify it's actually an element class
+        if hasattr(potential_class, '__mro__') and issubclass(potential_class, inkex.BaseElement):
             return potential_class
 
     # Fallback to explicit mapping
@@ -188,6 +188,7 @@ def get_unique_id(
             custom_id = f"{original_id}_{counter}"
             counter += 1
 
+        reserved.add(custom_id)
         return custom_id
 
     # Use tag name as prefix, converting camelCase to lowercase
@@ -200,4 +201,5 @@ def get_unique_id(
         candidate = f"{generated}_{counter}"
         counter += 1
 
+    reserved.add(candidate)
     return candidate

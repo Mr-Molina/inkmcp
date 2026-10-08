@@ -276,24 +276,64 @@ def execute_hybrid_code(client: 'InkscapeClient', code: str, args) -> Dict[str, 
                 }
 
                 # Set up local execution environment with standard modules
-                injected_names = {'json', 're', 'os', 'sys', '__builtins__'}
+                # SECURITY: os and sys are intentionally excluded — they provide
+                # file-system and process access that must not be available here.
+                injected_names = {'json', 're', '__builtins__'}
                 local_env = {
                     '__builtins__': safe_builtins,
                     'json': json,
                     're': re,
-                    'os': os,
-                    'sys': sys,
                 }
                 
                 # Inject shared context (from previous blocks)
                 local_env.update(shared_context)
+
+                # AST pre-validation: block dangerous patterns before exec()
+                import ast
+                violations = []
+                try:
+                    tree = ast.parse(block_code)
+                    class SecurityVisitor(ast.NodeVisitor):
+                        def visit_Attribute(self, node):
+                            if node.attr in ('__subclasses__', '__bases__', '__globals__', '__mro__', '__code__'):
+                                violations.append(f"Disallowed attribute access: {node.attr}")
+                            self.generic_visit(node)
+                        def visit_Name(self, node):
+                            if node.id in ('eval', 'exec', '__import__', 'open'):
+                                violations.append(f"Disallowed builtin usage: {node.id}")
+                            self.generic_visit(node)
+                    SecurityVisitor().visit(tree)
+                except SyntaxError:
+                    violations.append("Syntax error")
+
+                if not violations:
+                    from inkmcp.inkmcpops.execute_operations import _validate_code_safety
+                    violations = _validate_code_safety(block_code) or []
+
+                if violations:
+                    print(f"[Security] Block {block_idx + 1} skipped — "
+                          f"violations: {'; '.join(violations)}")
+                    continue
                 
                 # Capture output
                 stdout_capture = io.StringIO()
                 stderr_capture = io.StringIO()
                 
+                print(f"[Security Log] Executing dynamic block {block_idx + 1} with isolated builtins.")
+                
+                # SEC-009: Isolate __builtins__ from module modification
+                if "__builtins__" in local_env and isinstance(local_env["__builtins__"], dict):
+                    local_env["__builtins__"] = local_env["__builtins__"].copy()
+                else:
+                    local_env["__builtins__"] = {}
+                
                 with redirect_stdout(stdout_capture), redirect_stderr(stderr_capture):
-                    exec(block_code, local_env)
+                    try:
+                        exec(block_code, local_env)
+                    except Exception as e:
+                        print(f"[Security/Execution Error] Block {block_idx + 1} trapped: {e}")
+                        combined_errors.append(f"[Local Block {block_idx + 1} Error] {e}")
+                        continue
                 
                 # Capture output
                 stdout_out = stdout_capture.getvalue()
@@ -567,7 +607,7 @@ def parse_attributes(param_str: str) -> Dict[str, Any]:
     attributes = {}
 
     # Refactored param_pattern (LOGIC-001 & LOGIC-007)
-    param_pattern = r'(\w+(?:[:-]\w+)*)=("((?:\\.|[^"\\])*)"|\'((?:\\.|[^\'\\])*)\'|(\[[^\]]*\])|([^\s,=]+))'
+    param_pattern = r'(\w+(?:[:-]\w+)*)=("([^"\\]*(?:\\.[^"\\]*)*)"|\'([^\'\\]*(?:\\.[^\'\\]*)*)\'|(\[[^\]]*\])|([^\s,=]+))'
     raw_matches = re.findall(param_pattern, param_str, re.DOTALL)
 
     for match in raw_matches:
@@ -770,6 +810,7 @@ Examples:
     parser.add_argument("-f", "--file", help="Read parameters from file")
     parser.add_argument("--parse-out", action="store_true", help="Parse and return structured JSON response")
     parser.add_argument("--pretty", action="store_true", help="Pretty print JSON output")
+    parser.add_argument("--strict-boundary", action="store_true", help="Prevent arbitrary path traversal outside expected boundaries")
 
     args = parser.parse_args()
 
@@ -781,11 +822,19 @@ Examples:
 
         # Handle file input
         if args.file:
-            if not os.path.exists(args.file):
-                print(f"❌ File not found: {args.file}", file=sys.stderr)
+            # SEC-011: Normalize paths and apply strict boundary mode if requested
+            abs_file_path = os.path.abspath(args.file)
+            if args.strict_boundary:
+                expected_boundary = os.path.abspath(os.getcwd())
+                if not abs_file_path.startswith(expected_boundary):
+                    print(f"[Security Error] ❌ File path outside expected boundary: {abs_file_path}", file=sys.stderr)
+                    return 1
+
+            if not os.path.exists(abs_file_path):
+                print(f"❌ File not found: {abs_file_path}", file=sys.stderr)
                 return 1
 
-            with open(args.file, 'r', encoding='utf-8') as f:
+            with open(abs_file_path, 'r', encoding='utf-8') as f:
                 file_content = f.read().strip()
 
             if args.tag == "execute-hybrid":
@@ -880,6 +929,7 @@ Examples:
                 else:
                     # Human-readable output for batch
                     results = []
+                    all_success = True
                     for line_num, line in enumerate(lines, 1):
                         try:
                             element_data = parse_tag_and_attributes(line)
@@ -889,17 +939,20 @@ Examples:
                                     element_data['attributes']['code'] = strip_python_comments(element_data['attributes']['code'])
                                 
                                 result = client.execute_command(element_data)
+                                if not result.get('success'):
+                                    all_success = False
                                 results.append(f"Line {line_num}: {client.format_response(result, element_data.get('tag', ''))}")
                             else:
+                                all_success = False
                                 results.append(f"Line {line_num}: ❌ Failed to parse command: {line}")
                         except Exception as e:
+                            all_success = False
                             results.append(f"Line {line_num}: ❌ Error: {str(e)}")
 
                     for result_line in results:
                         print(result_line)
 
                     # Return success if all commands succeeded
-                    all_success = all("❌" not in result_line for result_line in results)
                     return 0 if all_success else 1
             else:
                 # For other commands with -f, file content replaces params

@@ -44,3 +44,20 @@ coverage.xml
 # IDE and tool caches
 .cache/
 *.tmp
+
+# Environment and secrets
+.env
+.env.*
+
+# Log files
+*.log
+
+# Type checker caches
+.mypy_cache/
+
+# Private keys (safety)
+*.pem
+*.key
+
+# macOS
+.DS_Store

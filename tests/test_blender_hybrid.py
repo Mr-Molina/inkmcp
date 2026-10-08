@@ -14,96 +14,62 @@ Tests:
 import sys
 import os
 import json
+import importlib
 import pytest
 from unittest.mock import MagicMock, patch
 
-# Ensure repository root is in sys.path
-REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-if REPO_ROOT not in sys.path:
-    sys.path.insert(0, REPO_ROOT)
-
-# Mock mathutils and bpy if not running inside Blender environment
-class MockVector(tuple):
-    """Minimal mathutils.Vector mock for testing geometric algorithms."""
-
-    def __new__(cls, coords):
-        return super().__new__(cls, tuple(float(c) for c in coords))
-
-    @property
-    def x(self):
-        return self[0]
-
-    @property
-    def y(self):
-        return self[1]
-
-    @property
-    def z(self):
-        return self[2] if len(self) > 2 else 0.0
-
-    @property
-    def w(self):
-        return self[3] if len(self) > 3 else 1.0
-
-    @property
-    def length_squared(self):
-        return sum(c * c for c in self)
-
-    def __add__(self, other):
-        return MockVector(tuple(a + b for a, b in zip(self, other)))
-
-    def __sub__(self, other):
-        return MockVector(tuple(a - b for a, b in zip(self, other)))
-
-    def __mul__(self, scalar):
-        return MockVector(tuple(a * scalar for a in self))
-
-    def __rmul__(self, scalar):
-        return MockVector(tuple(a * scalar for a in self))
-
-    def __truediv__(self, scalar):
-        return MockVector(tuple(a / scalar for a in self))
+# Re-export mock classes from conftest so tests can reference them directly
+from tests.conftest import MockVector, MockMatrix
 
 
-class MockMatrix:
-    """Minimal mathutils.Matrix mock."""
-
-    def __init__(self, data=None):
-        self.data = data
-
-    def __matmul__(self, other):
-        if hasattr(self, "_proj_result"):
-            return self._proj_result
-        return other
+# ---------------------------------------------------------------------------
+# Module-level references populated by the _blender_modules autouse fixture
+# ---------------------------------------------------------------------------
+bih = None   # blender_inkscape_hybrid
+baih = None  # blender_addon_inkscape_hybrid
+b2i = None   # examples.blender2inkscape
 
 
-if "bpy" not in sys.modules:
-    mock_bpy = MagicMock()
-    mock_types = MagicMock()
-    mock_types.Operator = type("Operator", (), {})
-    mock_types.AddonPreferences = type("AddonPreferences", (), {})
-    mock_props = MagicMock()
-    mock_props.StringProperty = MagicMock(return_value="")
-    mock_bpy.types = mock_types
-    mock_bpy.props = mock_props
-    sys.modules["bpy"] = mock_bpy
-    sys.modules["bpy.types"] = mock_types
-    sys.modules["bpy.props"] = mock_props
+@pytest.fixture(autouse=True, scope="module")
+def _blender_modules(mock_bpy_modules):
+    """Import the blender target modules AFTER bpy mocks are in place.
 
-if "mathutils" not in sys.modules:
-    mock_mathutils = MagicMock()
-    mock_mathutils.Vector = MockVector
-    mock_mathutils.Matrix = MockMatrix
-    sys.modules["mathutils"] = mock_mathutils
+    Uses importlib to ensure the modules are (re-)loaded with the mocked
+    dependencies available in sys.modules. Populates the module-level
+    bih / baih / b2i references so test classes can use them.
+    """
+    global bih, baih, b2i
 
-if "bpy_extras" not in sys.modules:
-    sys.modules["bpy_extras"] = MagicMock()
-    sys.modules["bpy_extras.view3d_utils"] = MagicMock()
+    # Ensure repo root is importable (needed for top-level blender_* modules)
+    repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+    original_path = sys.path[:]
+    if repo_root not in sys.path:
+        sys.path.insert(0, repo_root)
 
-# Import target modules
-import blender_inkscape_hybrid as bih
-import blender_addon_inkscape_hybrid as baih
-import examples.blender2inkscape as b2i
+    try:
+        # Force (re-)import so mocks are picked up
+        if "blender_inkscape_hybrid" in sys.modules:
+            bih = importlib.reload(sys.modules["blender_inkscape_hybrid"])
+        else:
+            import blender_inkscape_hybrid
+            bih = blender_inkscape_hybrid
+
+        if "blender_addon_inkscape_hybrid" in sys.modules:
+            baih = importlib.reload(sys.modules["blender_addon_inkscape_hybrid"])
+        else:
+            import blender_addon_inkscape_hybrid
+            baih = blender_addon_inkscape_hybrid
+
+        if "examples.blender2inkscape" in sys.modules:
+            b2i = importlib.reload(sys.modules["examples.blender2inkscape"])
+        else:
+            import examples.blender2inkscape
+            b2i = examples.blender2inkscape
+
+        yield
+    finally:
+        # Restore sys.path
+        sys.path[:] = original_path
 
 
 # ==============================================================================
@@ -427,11 +393,13 @@ class TestVariableSerializationAndTempfile:
 
         with patch("tempfile.NamedTemporaryFile", side_effect=mock_named_tempfile), \
              patch("subprocess.run", return_value=mock_result), \
-             patch("os.unlink"):
+             patch("os.unlink"), \
+             patch("os.path.exists", return_value=True), \
+             patch("os.path.isfile", return_value=True):
             baih.execute_inkscape_block(
                 code="print('hello')",
                 variables={"coords": [10.5, 20.5], "title": "Shape"},
-                inkmcp_cli_path="dummy_cli.py"
+                inkmcp_cli_path="inkmcpcli.py"
             )
 
             assert len(captured_code) == 1

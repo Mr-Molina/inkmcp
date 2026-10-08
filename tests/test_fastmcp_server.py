@@ -309,12 +309,12 @@ def test_inkscape_connection_dynamic_reprobe():
             assert conn.backend.get_backend_name() == "windows_cli"
 
 
-def test_get_inkscape_connection_dynamic_reprobe():
+def test_get_inkscape_connection_dynamic_reprobe(monkeypatch):
     """Verify get_inkscape_connection re-attempts when previous connection was unavailable."""
     import inkmcp.inkscape_mcp_server as server_module
 
-    # Reset global
-    server_module._inkscape_connection = None
+    # Reset global via monkeypatch so original value is restored after the test
+    monkeypatch.setattr(server_module, '_inkscape_connection', None)
 
     # First attempt: no GUI running -> raises exception
     with patch("inkmcp.inkscape_mcp_server.get_operating_system", return_value="windows"), \

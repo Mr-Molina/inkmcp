@@ -85,9 +85,12 @@ def find_inkscape_executable() -> Optional[Path]:
         # 1. Check environment variable override
         env_override = os.environ.get("INKSCAPE_PATH")
         if env_override:
-            p = Path(env_override)
+            p = Path(env_override).resolve()
             if p.is_file():
+                logger.debug("Using INKSCAPE_PATH override: %s", p)
                 return p
+            else:
+                logger.warning("INKSCAPE_PATH set but file not found: %s", env_override)
 
         # 2. Check shutil.which for inkscape.com
         com_which = shutil.which("inkscape.com")
@@ -119,8 +122,13 @@ def find_inkscape_executable() -> Optional[Path]:
 
     # Linux / macOS / Unix
     env_override = os.environ.get("INKSCAPE_PATH")
-    if env_override and Path(env_override).is_file():
-        return Path(env_override)
+    if env_override:
+        p = Path(env_override).resolve()
+        if p.is_file():
+            logger.debug("Using INKSCAPE_PATH override: %s", p)
+            return p
+        else:
+            logger.warning("INKSCAPE_PATH set but file not found: %s", env_override)
 
     which_path = shutil.which("inkscape")
     if which_path:
@@ -177,7 +185,7 @@ def is_inkscape_process_running() -> bool:
     try:
         if os_name == "windows":
             cmd = ["tasklist", "/FI", "IMAGENAME eq inkscape.exe", "/FO", "CSV", "/NH"]
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=5, creationflags=0x08000000)
             return "inkscape.exe" in result.stdout.lower()
         else:
             cmd = ["pgrep", "-f", "inkscape"]
