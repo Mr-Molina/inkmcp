@@ -12,6 +12,7 @@ from inkmcp.vectorizer.core import (
     normalize_color_hex,
     parse_svg_path_to_rings,
 )
+from inkmcp.vectorizer.palette import standardize_color_palette
 
 
 @dataclass
@@ -219,6 +220,7 @@ class TopologyEngine:
         mode: str = "cut_ready",
         dimensions: Tuple[int, int] = (100, 100),
         filter_speckle: float = 4.0,
+        color_tolerance: float = 5.0,
     ) -> StructuredLayerData:
         """Processes raw vector paths into topologically organized layers.
 
@@ -227,6 +229,8 @@ class TopologyEngine:
             mode: 'cut_ready' for planar mosaic vinyl cuts, or 'layered' for laser mandala stack.
             dimensions: Document width and height tuple.
             filter_speckle: Minimum polygon area threshold to drop slivers.
+            color_tolerance: CIELAB Delta E threshold to merge near-identical colors (default 5.0).
+                If <= 0.0, color merging is disabled.
 
         Returns:
             StructuredLayerData containing ordered LayerGroup instances.
@@ -237,13 +241,24 @@ class TopologyEngine:
         if not paths:
             return StructuredLayerData(mode=mode, layers=[], dimensions=dimensions)
 
-        # 1. Group paths by normalized color_hex
+        # 1. Group paths by normalized color_hex and merge perceptually similar colors
+        color_areas: Dict[str, float] = {}
+        for p in paths:
+            hex_code = normalize_color_hex(p.color_hex)
+            color_areas[hex_code] = color_areas.get(hex_code, 0.0) + max(0.0, getattr(p, "area", 0.0))
+
+        color_map: Dict[str, str] = {}
+        if color_tolerance > 0.0:
+            color_map = standardize_color_palette(color_areas, delta_e_threshold=color_tolerance)
+
         color_groups_map: Dict[str, List[PathRecord]] = {}
         for p in paths:
             hex_code = normalize_color_hex(p.color_hex)
-            if hex_code not in color_groups_map:
-                color_groups_map[hex_code] = []
-            color_groups_map[hex_code].append(p)
+            canonical_color = color_map.get(hex_code, hex_code)
+            p.color_hex = canonical_color
+            if canonical_color not in color_groups_map:
+                color_groups_map[canonical_color] = []
+            color_groups_map[canonical_color].append(p)
 
         # 2. Convert each group into unified Shapely geometry and calculate total area
         group_items = []

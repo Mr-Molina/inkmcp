@@ -55,6 +55,7 @@ def vectorize_image_operation(
             - num_colors (int, optional): Clamped 2..32, default 8.
             - filter_speckle (float, optional): Speckle cutoff area, default 4.0.
             - smoothness (float, optional): Curve smoothness multiplier, default 1.0.
+            - color_tolerance (float, optional): CIELAB Delta E color merging threshold, default 5.0.
             - denoise (bool, optional): Bilateral filter denoising, default True.
             - remove_background (bool, optional): Backdrop removal, default False.
             - inject_to_inkscape (bool, optional): Live GUI injection, default True.
@@ -96,6 +97,11 @@ def vectorize_image_operation(
         except (ValueError, TypeError):
             smoothness = 1.0
         smoothness = max(0.1, smoothness)
+
+        try:
+            color_tolerance = float(params.get("color_tolerance", 5.0))
+        except (ValueError, TypeError):
+            color_tolerance = 5.0
 
         # Map smoothness multiplier to VTracer curve fitting thresholds
         segment_length = max(1, int(round(4 * smoothness)))
@@ -147,6 +153,7 @@ def vectorize_image_operation(
             mode=mode,
             dimensions=raw_vector.dimensions,
             filter_speckle=filter_speckle,
+            color_tolerance=color_tolerance,
         )
 
         # 6. Build and optimize SVG markup

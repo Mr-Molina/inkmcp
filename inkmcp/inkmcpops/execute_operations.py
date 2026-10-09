@@ -214,6 +214,8 @@ def execute_code(extension_instance, svg, attributes: Dict[str, Any]) -> Dict[st
                         exec(code, execution_globals, execution_locals)
                 except Exception as e:
                     exec_exception.append((e, traceback.format_exc()))
+                except BaseException:
+                    pass
             
             import threading
             thread = threading.Thread(target=_run_exec, daemon=True)
@@ -221,6 +223,14 @@ def execute_code(extension_instance, svg, attributes: Dict[str, Any]) -> Dict[st
             thread.join(timeout=timeout_seconds)
 
             if thread.is_alive():
+                try:
+                    import ctypes
+                    ctypes.pythonapi.PyThreadState_SetAsyncExc(
+                        ctypes.c_ulong(thread.ident),
+                        ctypes.py_object(SystemExit),
+                    )
+                except Exception:
+                    pass
                 result_data["errors"] = f"Execution error: Timeout after {timeout_seconds} seconds"
                 result_data["execution_successful"] = False
             elif exec_exception:

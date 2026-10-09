@@ -72,6 +72,14 @@ def normalize_color_hex(fill: Optional[str]) -> str:
     if val.lower() in named_colors:
         return named_colors[val.lower()]
 
+    clean = re.sub(r"[^0-9a-fA-F]", "", val)
+    if len(clean) == 3:
+        clean = "".join(c * 2 for c in clean)
+    if len(clean) >= 6:
+        return f"#{clean[:6].upper()}"
+
+    return "#000000"
+
 def _format_coord(v: float) -> str:
     """Formats float coordinate with up to 4 decimals, trimming unnecessary zeros."""
     s = f"{v:.4f}"

@@ -474,6 +474,7 @@ async def vectorize_image(
     num_colors: int = 8,
     filter_speckle: float = 4.0,
     smoothness: float = 1.0,
+    color_tolerance: float = 5.0,
     inject_to_inkscape: bool = True,
     output_path: Optional[str] = None,
     denoise: bool = True,
@@ -494,6 +495,7 @@ async def vectorize_image(
     - num_colors: Color quantization count (clamped to 2..32, default: 8).
     - filter_speckle: Minimum speckle cutoff area in square pixels (default: 4.0).
     - smoothness: Curve smoothing multiplier (default: 1.0; higher = smoother curves).
+    - color_tolerance: CIELAB Delta E threshold to merge near-identical colors (default: 5.0; 0 to disable).
     - inject_to_inkscape: If True, injects vectorized layers directly into active Inkscape canvas.
                           If False or if GUI is offline, exports directly to SVG file.
     - output_path: Optional explicit file path to save the optimized SVG.
@@ -527,6 +529,7 @@ async def vectorize_image(
         "num_colors": num_colors,
         "filter_speckle": filter_speckle,
         "smoothness": smoothness,
+        "color_tolerance": color_tolerance,
         "inject_to_inkscape": inject_to_inkscape,
         "output_path": output_path,
         "denoise": denoise,
