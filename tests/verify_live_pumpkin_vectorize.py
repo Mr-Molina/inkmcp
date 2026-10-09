@@ -28,6 +28,10 @@ WORKSPACE_ROOT = Path(__file__).resolve().parent.parent
 SCRATCH_DIR = WORKSPACE_ROOT / "scratch"
 CUT_READY_SVG = SCRATCH_DIR / "pumpkin_cut_ready.svg"
 LAYERED_SVG = SCRATCH_DIR / "pumpkin_layered.svg"
+FILIGREE_PUMPKIN_IMAGE_PATH = Path(
+    "C:/Users/jmolina/.gemini/antigravity/brain/30850e01-bbf0-4c4b-947c-5bfc2ae18213/.user_uploaded/media_1791565153197_eb484739.png"
+)
+SILHOUETTE_SVG = SCRATCH_DIR / "filigree_silhouette.svg"
 CERTIFIED_SCREENSHOT = SCRATCH_DIR / "inkscape_pumpkin_certified.png"
 
 # SVG Namespaces
@@ -206,6 +210,88 @@ def test_pumpkin_vectorize_layered():
     elif base_geom.geom_type == "MultiPolygon":
         for poly in base_geom.geoms:
             assert len(poly.interiors) == 0, f"Baseplate silhouette contains interior holes: {len(poly.interiors)}"
+
+
+def test_pumpkin_vectorize_silhouette():
+    """Test silhouette decal mode on filigree pumpkin with compound hole preservation."""
+    assert FILIGREE_PUMPKIN_IMAGE_PATH.exists(), f"Filigree pumpkin image not found at {FILIGREE_PUMPKIN_IMAGE_PATH}"
+
+    params = {
+        "image_path": str(FILIGREE_PUMPKIN_IMAGE_PATH),
+        "output_path": str(SILHOUETTE_SVG),
+        "mode": "silhouette",
+        "filter_speckle": 4.0,
+        "inject_to_inkscape": False,
+    }
+
+    result = vectorize_image_operation(params, backend=None)
+    assert result["status"] == "success", f"Vectorization failed: {result}"
+    data = result["data"]
+
+    # File and metric assertions
+    assert SILHOUETTE_SVG.exists(), "Output silhouette SVG was not created"
+    assert SILHOUETTE_SVG.stat().st_size > 10000, "SVG file size under 10KB threshold"
+    assert data["layer_count"] == 1, f"Expected exactly 1 layer, got {data['layer_count']}"
+    assert len(data["layers"]) == 1, f"Expected 1 layer entry, got {len(data['layers'])}"
+    assert data["mode"] == "silhouette"
+
+    # Antialiasing fringe layer assertion (0 fringe layers)
+    fringe_colors = {"#EDC489", "#E7AE60", "#F5E8CD"}
+    layer_colors = {layer["color_hex"].upper() for layer in data["layers"]}
+    for fringe in fringe_colors:
+        assert fringe.upper() not in layer_colors, f"Antialiasing fringe color {fringe} present in layers"
+
+    # XML schema assertions
+    tree = ET.parse(SILHOUETTE_SVG)
+    root = tree.getroot()
+    assert root.tag.endswith("svg"), f"Root element is not svg: {root.tag}"
+
+    # Verify zero 600x400 canvas bounding rectangle paths
+    from inkmcp.vectorizer.core import parse_svg_path_to_rings
+    for elem in root.iter():
+        if elem.tag.endswith("rect"):
+            w = float(elem.attrib.get("width", 0))
+            h = float(elem.attrib.get("height", 0))
+            assert not (w >= 590 and h >= 390), f"Found full canvas rect: {w}x{h}"
+        elif elem.tag.endswith("path"):
+            d = elem.attrib.get("d", "")
+            rings = parse_svg_path_to_rings(d)
+            for r in rings:
+                if len(r) >= 4:
+                    xs = [pt[0] for pt in r]
+                    ys = [pt[1] for pt in r]
+                    w = max(xs) - min(xs)
+                    h = max(ys) - min(ys)
+                    assert not (w >= 595 and h >= 395), f"Found full canvas bounding path ring: {w}x{h}"
+
+    # Compound polygon internal filigree holes assertion
+    paths = [e for e in root.iter() if e.tag.endswith("path")]
+    assert len(paths) >= 1, "No path elements found in silhouette SVG"
+    for p in paths:
+        assert p.attrib.get("fill-rule") == "evenodd", f"Expected fill-rule='evenodd', got {p.attrib.get('fill-rule')}"
+
+    from inkmcp.vectorizer.core import PathRecord
+    path_records = [
+        PathRecord(
+            id=p.attrib.get("id", ""),
+            color_hex="#000000",
+            path_data=p.attrib["d"],
+            area=0.0,
+            fill_rule=p.attrib.get("fill-rule", "evenodd"),
+        )
+        for p in paths
+    ]
+    topology = TopologyEngine()
+    poly_geom = topology.paths_to_polygon(path_records)
+    assert not poly_geom.is_empty, "Compound polygon geometry is empty"
+
+    total_interiors = 0
+    if poly_geom.geom_type == "Polygon":
+        total_interiors = len(poly_geom.interiors)
+    elif poly_geom.geom_type == "MultiPolygon":
+        for p in poly_geom.geoms:
+            total_interiors += len(p.interiors)
+    assert total_interiors > 0, f"Expected internal filigree holes, but found {total_interiors}"
 
 
 def test_cli_pumpkin_vectorize_execution():
