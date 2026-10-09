@@ -72,7 +72,152 @@ def normalize_color_hex(fill: Optional[str]) -> str:
     if val.lower() in named_colors:
         return named_colors[val.lower()]
 
-    return val
+def _format_coord(v: float) -> str:
+    """Formats float coordinate with up to 4 decimals, trimming unnecessary zeros."""
+    s = f"{v:.4f}"
+    if "." in s:
+        s = s.rstrip("0").rstrip(".")
+    return "0" if s in ("-0", "") else s
+
+
+def parse_svg_transform_translate(transform_str: Optional[str]) -> Tuple[float, float]:
+    """Extracts (tx, ty) translation from an SVG transform string."""
+    if not transform_str or not transform_str.strip():
+        return (0.0, 0.0)
+
+    # Check translate(tx, ty) or translate(tx ty) or translate(tx)
+    m = re.search(
+        r"translate\(\s*([-+]?(?:\d*\.\d+|\d+)(?:[eE][-+]?\d+)?)(?:[\s,]+([-+]?(?:\d*\.\d+|\d+)(?:[eE][-+]?\d+)?))?\s*\)",
+        transform_str,
+    )
+    if m:
+        tx = float(m.group(1))
+        ty = float(m.group(2)) if m.group(2) is not None else 0.0
+        return (tx, ty)
+
+    # Check matrix(a, b, c, d, e, f) where e=tx, f=ty
+    m_mat = re.search(
+        r"matrix\(\s*[-+]?(?:\d*\.\d+|\d+)(?:[eE][-+]?\d+)?[\s,]+[-+]?(?:\d*\.\d+|\d+)(?:[eE][-+]?\d+)?[\s,]+[-+]?(?:\d*\.\d+|\d+)(?:[eE][-+]?\d+)?[\s,]+[-+]?(?:\d*\.\d+|\d+)(?:[eE][-+]?\d+)?[\s,]+([-+]?(?:\d*\.\d+|\d+)(?:[eE][-+]?\d+)?)[\s,]+([-+]?(?:\d*\.\d+|\d+)(?:[eE][-+]?\d+)?)\s*\)",
+        transform_str,
+    )
+    if m_mat:
+        tx = float(m_mat.group(1))
+        ty = float(m_mat.group(2))
+        return (tx, ty)
+
+    return (0.0, 0.0)
+
+
+def apply_translate_to_svg_path(d: str, tx: float, ty: float) -> str:
+    """Parses SVG path coordinates and shifts absolute coordinates by (+tx, +ty).
+
+    Handles absolute M, L, C, S, Q, T, H, V, A, and Z commands. Relative deltas
+    (lowercase commands) are preserved without shifting.
+    """
+    if not d or not d.strip():
+        return ""
+    if tx == 0.0 and ty == 0.0:
+        return d
+
+    tokens = re.findall(
+        r"[MmLlHhVvCcSsQqTtAaZz]|[-+]?(?:\d*\.\d+|\d+)(?:[eE][-+]?\d+)?", d
+    )
+    if not tokens:
+        return d
+
+    result: List[str] = []
+    idx = 0
+    current_cmd = ""
+
+    while idx < len(tokens):
+        token = tokens[idx]
+        if token.isalpha():
+            current_cmd = token
+            result.append(current_cmd)
+            idx += 1
+            continue
+
+        if current_cmd in ("M", "L", "T"):
+            if idx + 1 < len(tokens):
+                x = float(tokens[idx]) + tx
+                y = float(tokens[idx + 1]) + ty
+                result.append(_format_coord(x))
+                result.append(_format_coord(y))
+                idx += 2
+                if current_cmd == "M":
+                    current_cmd = "L"
+            else:
+                idx += 1
+        elif current_cmd == "C":
+            if idx + 5 < len(tokens):
+                x1 = float(tokens[idx]) + tx
+                y1 = float(tokens[idx + 1]) + ty
+                x2 = float(tokens[idx + 2]) + tx
+                y2 = float(tokens[idx + 3]) + ty
+                x3 = float(tokens[idx + 4]) + tx
+                y3 = float(tokens[idx + 5]) + ty
+                result.extend([
+                    _format_coord(x1),
+                    _format_coord(y1),
+                    _format_coord(x2),
+                    _format_coord(y2),
+                    _format_coord(x3),
+                    _format_coord(y3),
+                ])
+                idx += 6
+            else:
+                idx += 1
+        elif current_cmd in ("S", "Q"):
+            if idx + 3 < len(tokens):
+                x1 = float(tokens[idx]) + tx
+                y1 = float(tokens[idx + 1]) + ty
+                x2 = float(tokens[idx + 2]) + tx
+                y2 = float(tokens[idx + 3]) + ty
+                result.extend([
+                    _format_coord(x1),
+                    _format_coord(y1),
+                    _format_coord(x2),
+                    _format_coord(y2),
+                ])
+                idx += 4
+            else:
+                idx += 1
+        elif current_cmd == "H":
+            x = float(tokens[idx]) + tx
+            result.append(_format_coord(x))
+            idx += 1
+        elif current_cmd == "V":
+            y = float(tokens[idx]) + ty
+            result.append(_format_coord(y))
+            idx += 1
+        elif current_cmd == "A":
+            if idx + 6 < len(tokens):
+                rx = tokens[idx]
+                ry = tokens[idx + 1]
+                x_rot = tokens[idx + 2]
+                large_arc = tokens[idx + 3]
+                sweep = tokens[idx + 4]
+                x = float(tokens[idx + 5]) + tx
+                y = float(tokens[idx + 6]) + ty
+                result.extend([
+                    rx,
+                    ry,
+                    x_rot,
+                    large_arc,
+                    sweep,
+                    _format_coord(x),
+                    _format_coord(y),
+                ])
+                idx += 7
+            else:
+                idx += 1
+        elif current_cmd in ("Z", "z"):
+            idx += 1
+        else:
+            result.append(token)
+            idx += 1
+
+    return " ".join(result)
 
 
 def parse_svg_path_to_rings(
@@ -420,9 +565,13 @@ class VTracerCore:
 
         for elem in root.iter():
             if elem.tag.endswith("path") or elem.tag == "path":
-                path_data = elem.attrib.get("d", "").strip()
-                if not path_data:
+                raw_d = elem.attrib.get("d", "").strip()
+                if not raw_d:
                     continue
+
+                transform_attr = elem.attrib.get("transform")
+                tx, ty = parse_svg_transform_translate(transform_attr)
+                path_data = apply_translate_to_svg_path(raw_d, tx, ty)
 
                 area = calculate_svg_path_area(path_data)
                 if area <= 0.0:

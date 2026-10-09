@@ -118,6 +118,22 @@ def get_process_name_by_pid(pid: int) -> str:
 def capture_window_screenshot(hwnd: int, rect: RECT, output_path: str) -> bool:
     """Capture a screenshot of the specified window rectangle using ctypes GDI."""
     try:
+        # Bring target window to absolute foreground before capturing
+        fg_hwnd = u32.GetForegroundWindow()
+        if fg_hwnd != hwnd:
+            fg_pid = wintypes.DWORD()
+            fg_thread = u32.GetWindowThreadProcessId(fg_hwnd, ctypes.byref(fg_pid))
+            cur_thread = k32.GetCurrentThreadId()
+            u32.AttachThreadInput(cur_thread, fg_thread, True)
+            u32.ShowWindow(hwnd, 3)  # SW_MAXIMIZE
+            u32.SetForegroundWindow(hwnd)
+            u32.BringWindowToTop(hwnd)
+            u32.AttachThreadInput(cur_thread, fg_thread, False)
+            import time
+            time.sleep(0.8)
+            # Re-fetch window rect after bringing to front / maximize
+            u32.GetWindowRect(hwnd, ctypes.byref(rect))
+
         # Try PIL ImageGrab first if available for high-DPI awareness
         try:
             from PIL import ImageGrab
@@ -128,6 +144,8 @@ def capture_window_screenshot(hwnd: int, rect: RECT, output_path: str) -> bool:
                 max(0, rect.right),
                 max(0, rect.bottom),
             )
+            if bbox[2] <= bbox[0] or bbox[3] <= bbox[1]:
+                return False
             img = ImageGrab.grab(bbox=bbox, all_screens=True)
             norm_path = Path(output_path).resolve()
             norm_path.parent.mkdir(parents=True, exist_ok=True)
@@ -151,13 +169,7 @@ def capture_window_screenshot(hwnd: int, rect: RECT, output_path: str) -> bool:
         gdi32.BitBlt(hdc_mem, 0, 0, width, height, hdc_screen, rect.left, rect.top, SRCCOPY)
 
         # To write PNG without PIL is complex in raw ctypes, but we can save BMP or advise PIL
-        try:
-            from PIL import Image
-            import io
-            # If PIL is installed but ImageGrab failed, use BMP buffer
-            pass
-        except ImportError:
-            pass
+        # Fallback GDI DC cleanup
 
         u32.ReleaseDC(0, hdc_screen)
         gdi32.DeleteDC(hdc_mem)

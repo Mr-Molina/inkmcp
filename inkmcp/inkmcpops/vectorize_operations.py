@@ -8,10 +8,13 @@ file export, and live Inkscape canvas injection.
 import logging
 import os
 from pathlib import Path
+import subprocess
+import sys
 import tempfile
 from typing import Any, Dict, Optional
 
 from inkmcp.inkmcpops.common import create_error_response, create_success_response
+from inkmcp.platform_utils import find_inkscape_executable, is_inkscape_process_running
 from inkmcp.vectorizer import (
     ImagePreprocessor,
     SvgOptimizer,
@@ -20,6 +23,9 @@ from inkmcp.vectorizer import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Keep module references to launched background processes to avoid ResourceWarning in tests
+_ACTIVE_BACKGROUND_PROCESSES = []
 
 
 def _create_warning_response(message: str, **data: Any) -> Dict[str, Any]:
@@ -211,6 +217,20 @@ def vectorize_image_operation(
                 except Exception as e:
                     logger.warning("Failed injecting layers into Inkscape GUI: %s", e)
                     injected = False
+
+        # In addition to executing layer injection, also open output SVG in Inkscape GUI on Windows
+        if inject_to_inkscape and sys.platform == "win32" and is_inkscape_process_running():
+            if injected:
+                try:
+                    inkscape_bin = find_inkscape_executable() or "inkscape.com"
+                    proc = subprocess.Popen([str(inkscape_bin), resolved_output_path], shell=False)
+                    _ACTIVE_BACKGROUND_PROCESSES.append(proc)
+                    try:
+                        proc.wait(timeout=0.2)
+                    except Exception:
+                        pass
+                except Exception as e:
+                    logger.warning("Failed to open output SVG in Inkscape GUI via CLI: %s", e)
 
         # 9. Format response payload
         response_data = {

@@ -331,21 +331,23 @@ class TopologyEngine:
                 )
 
             # Subsequent layers (1..N): Ordered from largest background to finest top accents
-            for z_idx, item in enumerate(group_items, start=1):
+            curr_z = 1
+            for item in group_items:
                 path_records = self._decompose_into_path_records(
-                    item["geom"], item["color_hex"], z_idx, filter_speckle
+                    item["geom"], item["color_hex"], curr_z, filter_speckle
                 )
                 if path_records:
-                    layer_id = f"layer_{z_idx:02d}"
-                    label = f"{z_idx:02d} - {item['color_hex']}"
+                    layer_id = f"layer_{curr_z:02d}"
+                    label = f"{curr_z:02d} - {item['color_hex']}"
                     layers.append(
                         LayerGroup(
                             layer_id=layer_id,
                             label=label,
                             color_hex=item["color_hex"],
                             paths=path_records,
-                            z_index=z_idx,
+                            z_index=curr_z,
                         )
                     )
+                    curr_z += 1
 
         return StructuredLayerData(mode=mode, layers=layers, dimensions=dimensions)

@@ -128,7 +128,7 @@ def test_pumpkin_vectorize_cut_ready():
         if not poly.is_empty:
             layer_polys.append((layer_dict["layer_id"], poly))
 
-    # Check pairwise overlap between distinct layers
+    # Check pairwise overlap between distinct layers (0.0 inter-layer overlap)
     for i in range(len(layer_polys)):
         for j in range(i + 1, len(layer_polys)):
             id_i, poly_i = layer_polys[i]
@@ -137,9 +137,9 @@ def test_pumpkin_vectorize_cut_ready():
             overlap_area = overlap.area
             min_area = min(poly_i.area, poly_j.area)
             overlap_pct = (overlap_area / min_area) * 100.0 if min_area > 0 else 0.0
-            # Planar tolerance: overlap area must be < 10.0 px^2 or < 0.05% of the layer area
-            assert overlap_area < 10.0 or overlap_pct < 0.05, (
-                f"Layers {id_i} and {id_j} overlap by {overlap_area:.3f} px^2 ({overlap_pct:.4f}%) in cut_ready mode!"
+            # Planar cut-ready assertion: 0.0 inter-layer overlap (rounded to 2 decimals)
+            assert round(overlap_area, 2) == 0.0, (
+                f"Layers {id_i} and {id_j} overlap by {overlap_area:.4f} px^2 ({overlap_pct:.4f}%) in cut_ready mode!"
             )
 
 
@@ -167,10 +167,10 @@ def test_pumpkin_vectorize_layered():
     assert data["layer_count"] >= 4
     assert data["mode"] == "layered"
 
-    # Baseplate Layer 0 assertion
+    # Baseplate Layer 0 assertion: layer_00_base solid backing
     layers_meta = data["layers"]
     baseplate = layers_meta[0]
-    assert baseplate["layer_id"] in ("layer_00", "layer_00_base"), f"Layer 0 ID should be layer_00 or layer_00_base, got {baseplate['layer_id']}"
+    assert baseplate["layer_id"] == "layer_00_base", f"Layer 0 ID should be layer_00_base, got {baseplate['layer_id']}"
     assert any(
         token in baseplate["label"] for token in ("Base", "Baseplate", "Silhouette")
     ), f"Layer 0 label should contain Base/Baseplate/Silhouette, got {baseplate['label']}"
@@ -180,13 +180,32 @@ def test_pumpkin_vectorize_layered():
     root = tree.getroot()
     baseplate_elem = None
     for elem in root.iter():
-        if elem.tag.endswith("g") and elem.attrib.get("id") in ("layer_00", "layer_00_base"):
+        if elem.tag.endswith("g") and elem.attrib.get("id") == "layer_00_base":
             baseplate_elem = elem
             break
 
-    assert baseplate_elem is not None, "Baseplate layer_00 element missing in SVG"
+    assert baseplate_elem is not None, "Baseplate layer_00_base element missing in SVG"
     paths = [e for e in baseplate_elem if e.tag.endswith("path")]
     assert len(paths) >= 1, "Baseplate has no path elements"
+    from inkmcp.vectorizer.core import PathRecord
+    base_records = [
+        PathRecord(
+            id=p.attrib.get("id", ""),
+            color_hex="#000000",
+            path_data=p.attrib["d"],
+            area=0.0,
+            fill_rule=p.attrib.get("fill-rule", "nonzero"),
+        )
+        for p in paths
+    ]
+    topology = TopologyEngine()
+    base_geom = topology.paths_to_polygon(base_records)
+    assert not base_geom.is_empty, "Baseplate geometry is empty"
+    if base_geom.geom_type == "Polygon":
+        assert len(base_geom.interiors) == 0, f"Baseplate silhouette contains interior holes: {len(base_geom.interiors)}"
+    elif base_geom.geom_type == "MultiPolygon":
+        for poly in base_geom.geoms:
+            assert len(poly.interiors) == 0, f"Baseplate silhouette contains interior holes: {len(poly.interiors)}"
 
 
 def test_cli_pumpkin_vectorize_execution():
@@ -287,8 +306,14 @@ def test_live_inkscape_gui_injection_and_desktop_certification():
 
     windows = json.loads(shot_res.stdout)
     assert len(windows) > 0, "No visible Inkscape windows detected on WinSta0\\Default"
-    target = windows[0]
+    target = next((w for w in windows if "pumpkin" in w["title"].lower()), windows[0])
     assert "inkscape" in target["process"].lower()
     assert target["visible"] is True
+    assert any(
+        token in target["title"].lower()
+        for token in ("pumpkin", "svg", "inkscape")
+    ), f"Window title does not indicate pumpkin document: {target['title']}"
     assert CERTIFIED_SCREENSHOT.exists(), "Screenshot was not created"
-    assert CERTIFIED_SCREENSHOT.stat().st_size > 10000, "Screenshot file size too small"
+    assert CERTIFIED_SCREENSHOT.stat().st_size > 50000, (
+        f"Screenshot file size too small: {CERTIFIED_SCREENSHOT.stat().st_size} bytes (expected > 50,000)"
+    )
