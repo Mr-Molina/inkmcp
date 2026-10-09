@@ -9,11 +9,8 @@ for SVG element creation, document manipulation, and code execution.
 
 import asyncio
 import concurrent.futures
-import json
 import logging
 import os
-import shutil
-import subprocess
 import tempfile
 import threading
 from contextlib import asynccontextmanager
@@ -420,6 +417,138 @@ async def inkscape_operation(ctx: Context, command: str) -> Union[str, ImageCont
                     os.remove(response_file)
             except (FileNotFoundError, OSError):
                 pass
+
+
+def format_vectorize_response(result: Dict[str, Any]) -> str:
+    """Format vectorize operation result for clean AI client display."""
+    status = result.get("status", "error")
+    data = result.get("data", {})
+    message = data.get("message", result.get("message", "Vectorization failed"))
+
+    if status == "error":
+        error_details = data.get("error_details", "")
+        if error_details and error_details != message:
+            return f"❌ **Vectorization Failed**: {message}\n\nDetails: {error_details}"
+        return f"❌ **Vectorization Failed**: {message}"
+
+    emoji = "✅" if status == "success" else "⚠️"
+    output_path = data.get("output_path", "")
+    mode = data.get("mode", "")
+    layer_count = data.get("layer_count", 0)
+    total_nodes = data.get("total_nodes", 0)
+    file_size = data.get("file_size", 0)
+    injected = data.get("injected", False)
+    layers = data.get("layers", [])
+
+    lines = [
+        f"{emoji} **{message}**",
+        "",
+        f"- **Output File**: `{output_path}`",
+        f"- **Mode**: `{mode}`",
+        f"- **Layers**: {layer_count}",
+        f"- **Total Nodes**: {total_nodes}",
+        f"- **File Size**: {file_size} bytes",
+        f"- **Injected to Inkscape**: {'Yes' if injected else 'No'}",
+    ]
+
+    if layers:
+        lines.append("")
+        lines.append("### Layer Breakdown")
+        lines.append("| Layer ID | Label | Color | Paths |")
+        lines.append("| :--- | :--- | :--- | :--- |")
+        for layer in layers:
+            lid = layer.get("layer_id", "")
+            lbl = layer.get("label", lid)
+            col = layer.get("color_hex", "")
+            pc = layer.get("path_count", 0)
+            lines.append(f"| `{lid}` | {lbl} | `{col}` | {pc} |")
+
+    return "\n".join(lines)
+
+
+@mcp.tool()
+async def vectorize_image(
+    ctx: Context,
+    image_path: str,
+    mode: str = "cut_ready",
+    num_colors: int = 8,
+    filter_speckle: float = 4.0,
+    smoothness: float = 1.0,
+    inject_to_inkscape: bool = True,
+    output_path: Optional[str] = None,
+    denoise: bool = True,
+    remove_background: bool = False,
+) -> str:
+    """Vectorize a raster image into a structured SVG document.
+
+    Converts flat raster images (PNG, JPG, BMP, WEBP, etc.) into clean,
+    scalable vector graphics with layered topology suitable for cutting or printing.
+
+    Parameters:
+    - image_path: Path to the raster image file.
+    - mode: Conversion geometry mode:
+        * 'cut_ready': Boolean-subtracted non-overlapping contours with undercuts removed.
+                       Optimized for vinyl cutters, laser cutters, plotters, and CNC.
+        * 'layered': Stacked shapes with undercuts preserved.
+                     Optimized for screen printing, illustration, and digital art.
+    - num_colors: Color quantization count (clamped to 2..32, default: 8).
+    - filter_speckle: Minimum speckle cutoff area in square pixels (default: 4.0).
+    - smoothness: Curve smoothing multiplier (default: 1.0; higher = smoother curves).
+    - inject_to_inkscape: If True, injects vectorized layers directly into active Inkscape canvas.
+                          If False or if GUI is offline, exports directly to SVG file.
+    - output_path: Optional explicit file path to save the optimized SVG.
+                   If not specified, a temporary file path is generated.
+    - denoise: Whether to apply bilateral filter denoising before quantization (default: True).
+    - remove_background: Whether to remove dominant uniform background color (default: False).
+
+    Returns:
+        Markdown-formatted summary including status emoji, file path, layer breakdown,
+        node count, and injection status.
+    """
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = asyncio.get_event_loop()
+
+    backend = None
+    if inject_to_inkscape:
+        try:
+            connection = await loop.run_in_executor(
+                _inkscape_executor, get_inkscape_connection
+            )
+            backend = connection.backend if connection else None
+        except Exception as e:
+            logger.info("Inkscape connection not available for live injection: %s", e)
+            backend = None
+
+    params = {
+        "image_path": image_path,
+        "mode": mode,
+        "num_colors": num_colors,
+        "filter_speckle": filter_speckle,
+        "smoothness": smoothness,
+        "inject_to_inkscape": inject_to_inkscape,
+        "output_path": output_path,
+        "denoise": denoise,
+        "remove_background": remove_background,
+    }
+
+    try:
+        from inkmcp.inkmcpops import vectorize_image_operation
+    except ImportError:
+        from inkmcpops import vectorize_image_operation
+
+    try:
+        result = await loop.run_in_executor(
+            _inkscape_executor,
+            vectorize_image_operation,
+            params,
+            backend,
+        )
+        return format_vectorize_response(result)
+    except Exception as e:
+        logger.error("Error in vectorize_image: %s", e, exc_info=True)
+        return f"❌ **Vectorization Failed**: {str(e)}"
 
 
 def main():

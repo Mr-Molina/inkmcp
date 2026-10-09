@@ -67,7 +67,6 @@ Known Issue: objectBoundingBox gradients require manual nudge to refresh visibil
 import argparse
 import sys
 import json
-import tempfile
 import os
 import subprocess
 import re
@@ -75,7 +74,7 @@ import io
 import tokenize
 import builtins
 from pathlib import Path
-from typing import Dict, List, Any
+from typing import Dict, List, Any, Optional
 
 # Ensure repository root is on sys.path for standalone script execution
 _parent_dir = str(Path(__file__).resolve().parent.parent)
@@ -641,6 +640,90 @@ def parse_attributes(param_str: str) -> Dict[str, Any]:
     return attributes
 
 
+def parse_vectorize_params(raw_params: Any) -> Dict[str, Any]:
+    """
+    Parse vectorize-image CLI parameters from list of tokens, string, or JSON.
+    Preserves paths with spaces without stripping or improper truncation.
+    """
+    if raw_params is None:
+        return {}
+
+    if isinstance(raw_params, dict):
+        return raw_params
+
+    if isinstance(raw_params, list):
+        if not raw_params:
+            return {}
+        if len(raw_params) == 1:
+            return parse_vectorize_params(raw_params[0])
+
+        result: Dict[str, Any] = {}
+        current_key: Optional[str] = None
+        current_val_parts: List[str] = []
+
+        for token in raw_params:
+            m = re.match(r"^([a-zA-Z_]\w*)=(.*)$", token, re.DOTALL)
+            if m:
+                if current_key is not None:
+                    val = " ".join(current_val_parts).strip()
+                    if (val.startswith('"') and val.endswith('"')) or (
+                        val.startswith("'") and val.endswith("'")
+                    ):
+                        val = val[1:-1]
+                    result[current_key] = val
+                    current_val_parts = []
+                current_key = m.group(1)
+                v = m.group(2)
+                if v:
+                    current_val_parts.append(v)
+            else:
+                if current_key is not None:
+                    current_val_parts.append(token)
+
+        if current_key is not None:
+            val = " ".join(current_val_parts).strip()
+            if (val.startswith('"') and val.endswith('"')) or (
+                val.startswith("'") and val.endswith("'")
+            ):
+                val = val[1:-1]
+            result[current_key] = val
+
+        return result
+
+    raw_str = str(raw_params).strip()
+    if not raw_str:
+        return {}
+
+    if raw_str.startswith("{") and raw_str.endswith("}"):
+        try:
+            parsed = json.loads(raw_str)
+            if isinstance(parsed, dict):
+                return parsed
+        except Exception:
+            pass
+
+    result = {}
+    matches = re.finditer(
+        r"(?:^|\s+)([a-zA-Z_]\w*)=(.*?)(?=(?:\s+[a-zA-Z_]\w*=|$))",
+        raw_str,
+        re.DOTALL,
+    )
+    for m in matches:
+        k = m.group(1)
+        v = m.group(2).strip()
+        if (val := v) and (
+            (val.startswith('"') and val.endswith('"'))
+            or (val.startswith("'") and val.endswith("'"))
+        ):
+            v = val[1:-1]
+        result[k] = v
+
+    if result:
+        return result
+
+    return parse_attributes(raw_str)
+
+
 class InkscapeClient:
     """D-Bus client for SVG element creation"""
 
@@ -664,6 +747,10 @@ class InkscapeClient:
         Returns:
             Element data dictionary
         """
+        # Handle vectorize-image command
+        if tag.lower().replace("_", "-") == "vectorize-image":
+            return {"tag": tag, "attributes": parse_vectorize_params(param_str)}
+
         # Use the unified parsing approach
         full_content = f"{tag} {param_str}".strip()
         result = parse_tag_and_attributes(full_content)
@@ -708,6 +795,17 @@ class InkscapeClient:
         # Check if we have a proper response from response file
         if "response" in result:
             response_data = result["response"]
+            if tag.lower().replace("_", "-") == "vectorize-image":
+                data = response_data.get("data", {})
+                status_icon = "✅" if response_data.get("status") == "success" else "⚠️"
+                msg = response_data.get("message", "Vectorization completed")
+                out_path = data.get("output_path", "")
+                layer_cnt = data.get("layer_count", 0)
+                node_cnt = data.get("total_nodes", 0)
+                if out_path:
+                    return f"{status_icon} {msg}\nOutput: {out_path} ({layer_cnt} layers, {node_cnt} nodes)"
+                return f"{status_icon} {msg}"
+
             if response_data.get("status") == "success":
                 data = response_data.get("data", {})
                 
@@ -771,6 +869,18 @@ class InkscapeClient:
 
 
 def main():
+    # Ensure UTF-8 output encoding for cross-platform Unicode/emoji support on Windows
+    if hasattr(sys.stdout, "reconfigure"):
+        try:
+            sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+    if hasattr(sys.stderr, "reconfigure"):
+        try:
+            sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+
     parser = argparse.ArgumentParser(
         description="Inkscape MCP Client",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -806,7 +916,7 @@ Examples:
     )
 
     parser.add_argument("tag", help="SVG tag name or info action")
-    parser.add_argument("params", nargs="?", default="", help="Parameters string")
+    parser.add_argument("params", nargs="*", default=[], help="Parameters string")
     parser.add_argument("-f", "--file", help="Read parameters from file")
     parser.add_argument("--parse-out", action="store_true", help="Parse and return structured JSON response")
     parser.add_argument("--pretty", action="store_true", help="Pretty print JSON output")
@@ -817,8 +927,86 @@ Examples:
     client = InkscapeClient()
 
     try:
-        # Initialize params
-        params = args.params
+        # Handle vectorize-image command
+        if args.tag.lower().replace("_", "-") == "vectorize-image":
+            if args.file:
+                abs_file_path = os.path.abspath(args.file)
+                if args.strict_boundary:
+                    expected_boundary = os.path.abspath(os.getcwd())
+                    if not abs_file_path.startswith(expected_boundary):
+                        print(f"[Security Error] ❌ File path outside expected boundary: {abs_file_path}", file=sys.stderr)
+                        return 1
+
+                if not os.path.exists(abs_file_path):
+                    print(f"❌ File not found: {abs_file_path}", file=sys.stderr)
+                    return 1
+
+                if args.params and any(p.strip() for p in args.params):
+                    print("❌ Cannot use both -f option and parameters", file=sys.stderr)
+                    return 1
+
+                with open(abs_file_path, "r", encoding="utf-8") as f:
+                    file_content = f.read().strip()
+                params_dict = parse_vectorize_params(file_content)
+            else:
+                params_dict = parse_vectorize_params(args.params)
+
+            try:
+                from inkmcp.inkscape_mcp_server import InkscapeConnection
+            except ImportError:
+                from inkscape_mcp_server import InkscapeConnection
+
+            try:
+                from inkmcp.inkmcpops import vectorize_image_operation
+            except ImportError:
+                from inkmcpops import vectorize_image_operation
+
+            conn = InkscapeConnection(allow_headless=True)
+            backend = conn.backend
+
+            result = vectorize_image_operation(params_dict, backend=backend)
+
+            is_ok = result.get("status") in ("success", "warning")
+            params_str = " ".join(args.params) if isinstance(args.params, list) else str(args.params)
+
+            if args.parse_out or args.pretty:
+                output = {
+                    "command": f"{args.tag} {params_str}".strip(),
+                    "tag": args.tag,
+                    "status": result.get("status"),
+                    "output_path": result.get("data", {}).get("output_path"),
+                    "layer_count": result.get("data", {}).get("layer_count"),
+                    "mode": result.get("data", {}).get("mode"),
+                    "total_nodes": result.get("data", {}).get("total_nodes"),
+                    "data": result.get("data", {}),
+                    "result": result,
+                }
+                if args.pretty:
+                    print(json.dumps(output, indent=2))
+                else:
+                    print(json.dumps(output))
+            else:
+                if not is_ok:
+                    err_msg = result.get("message") or result.get("data", {}).get("error", "Vectorization failed")
+                    print(f"❌ Error: {err_msg}", file=sys.stderr)
+                else:
+                    data = result.get("data", {})
+                    icon = "✅" if result.get("status") == "success" else "⚠️"
+                    msg = result.get("message", "Vectorization completed")
+                    out_path = data.get("output_path", "")
+                    layer_cnt = data.get("layer_count", 0)
+                    node_cnt = data.get("total_nodes", 0)
+                    print(f"{icon} {msg}")
+                    if out_path:
+                        print(f"Output: {out_path} ({layer_cnt} layers, {node_cnt} nodes)")
+
+            return 0 if is_ok else 1
+
+        # Initialize params for other commands
+        if isinstance(args.params, list):
+            params = " ".join(args.params)
+        else:
+            params = args.params or ""
 
         # Handle file input
         if args.file:
@@ -1011,11 +1199,20 @@ def parse_command_string(command: str) -> Dict[str, Any]:
     Args:
         command: Command string like "rect x=100 y=50 width=200 height=100"
                 or "g map_id=myGroup children=[{rect map_id=r1 x=0 y=0}]"
+                or "vectorize-image image_path=..."
 
     Returns:
         Parsed element data dictionary
     """
-    result = parse_tag_and_attributes(command)
+    stripped = command.strip()
+    parts = stripped.split(None, 1)
+    if parts and parts[0].lower().replace("_", "-") == "vectorize-image":
+        param_part = parts[1] if len(parts) > 1 else ""
+        return {
+            "tag": parts[0],
+            "attributes": parse_vectorize_params(param_part),
+        }
+    result = parse_tag_and_attributes(stripped)
     return result if result is not None else {"tag": "", "attributes": {}}
 
 
