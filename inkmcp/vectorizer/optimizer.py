@@ -87,9 +87,14 @@ class SvgOptimizer:
                 for path in layer.paths:
                     path_id = _escape_attr(path.id)
                     fill_color = _escape_attr(path.color_hex)
+                    fill_rule_val = (
+                        "evenodd"
+                        if (layer_data and getattr(layer_data, "mode", None) == "silhouette")
+                        else path.fill_rule
+                    )
                     fill_rule = (
-                        f' fill-rule="{_escape_attr(path.fill_rule)}"'
-                        if path.fill_rule
+                        f' fill-rule="{_escape_attr(fill_rule_val)}"'
+                        if fill_rule_val
                         else ""
                     )
                     path_data = _escape_attr(path.path_data)

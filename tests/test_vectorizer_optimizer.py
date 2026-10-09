@@ -217,3 +217,18 @@ def test_svg_optimizer_default_dimensions_fallback():
     assert 'viewBox="0 0 420 280"' in svg
     assert 'width="420"' in svg
     assert 'height="280"' in svg
+
+
+def test_optimizer_silhouette_fill_rule_evenodd():
+    """Assert fill-rule="evenodd" is rendered in <path> tags for silhouette mode."""
+    layer = LayerGroup(
+        layer_id="layer_01",
+        label="01 - #E2830B",
+        z_index=1,
+        color_hex="#E2830B",
+        paths=[PathRecord(path_id="p1", path_data="M 0 0 L 10 0 L 10 10 Z", color_hex="#E2830B", area=50.0)],
+    )
+    layer_data = StructuredLayerData(layers=[layer], dimensions=(100, 100), mode="silhouette")
+    optimizer = SvgOptimizer()
+    svg = optimizer.build_svg(layer_data)
+    assert 'fill-rule="evenodd"' in svg

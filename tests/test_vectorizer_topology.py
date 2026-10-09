@@ -256,3 +256,66 @@ def test_donut_with_holes_zero_overlap():
     # The donut's area should remain approximately 300 since peg was inside the hole
     assert abs(poly0.area - 300.0) < 1.0
     assert abs(poly1.area - 16.0) < 1e-2
+
+
+def test_topology_silhouette_mode_compound_holes():
+    """Verify outer polygon with an inner hole results in a compound polygon with interior ring intact in 1 layer."""
+    # Donut: outer square 10..90, inner hole 30..70
+    outer_d = "M 10 10 L 90 10 L 90 90 L 10 90 Z"
+    inner_d = "M 30 30 L 70 30 L 70 70 L 30 70 Z"
+    paths = [
+        PathRecord(path_id="p1", path_data=outer_d, color_hex="#E2830B", area=6400.0),
+        PathRecord(path_id="p2", path_data=inner_d, color_hex="#E2830B", area=1600.0),
+    ]
+
+    engine = TopologyEngine()
+    result = engine.process(paths, mode="silhouette", dimensions=(100, 100))
+
+    assert result.mode == "silhouette"
+    assert len(result.layers) == 1
+    assert result.layers[0].layer_id == "layer_01"
+    assert result.layers[0].color_hex == "#E2830B"
+
+    # Verify compound polygon has interior hole intact
+    geom = engine.paths_to_polygon(result.layers[0].paths)
+    assert geom.is_valid
+    assert len(geom.interiors) == 1
+    assert abs(geom.area - 4800.0) < 1.0
+
+
+def test_topology_silhouette_strips_canvas_box():
+    """Verify a 100x100 canvas rectangle is completely removed, leaving only the subject geometry."""
+    # 100x100 full canvas box and a 20x20 subject inside
+    canvas_d = "M 0 0 L 100 0 L 100 100 L 0 100 Z"
+    subject_d = "M 40 40 L 60 40 L 60 60 L 40 60 Z"
+    paths = [
+        PathRecord(path_id="p0", path_data=canvas_d, color_hex="#FFFFFF", area=10000.0),
+        PathRecord(path_id="p1", path_data=subject_d, color_hex="#E2830B", area=400.0),
+    ]
+    engine = TopologyEngine()
+    result = engine.process(paths, mode="silhouette", dimensions=(100, 100))
+
+    # Canvas box must be pruned, leaving only the subject
+    assert len(result.layers) == 1
+    assert result.layers[0].color_hex == "#E2830B"
+    geom = engine.paths_to_polygon(result.layers[0].paths)
+    assert abs(geom.area - 400.0) < 1.0
+
+
+def test_topology_silhouette_mode_isolates_watermark():
+    """Verify primary body with disconnected bottom text produces distinct polygon components with zero bridging."""
+    # Subject (pumpkin body) at y=20..80 and disconnected watermark text at y=90..95
+    subject_d = "M 20 20 L 80 20 L 80 80 L 20 80 Z"
+    watermark_d = "M 30 90 L 70 90 L 70 95 L 30 95 Z"
+    paths = [
+        PathRecord(path_id="p1", path_data=subject_d, color_hex="#E2830B", area=3600.0),
+        PathRecord(path_id="p2", path_data=watermark_d, color_hex="#E2830B", area=200.0),
+    ]
+    engine = TopologyEngine()
+    result = engine.process(paths, mode="silhouette", dimensions=(100, 100))
+    assert len(result.layers) == 1
+
+    # Must produce separate polygon components without bridging
+    geom = engine.paths_to_polygon(result.layers[0].paths)
+    assert geom.geom_type in ("MultiPolygon", "GeometryCollection")
+    assert len(geom.geoms) == 2

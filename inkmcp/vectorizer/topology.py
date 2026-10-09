@@ -235,11 +235,112 @@ class TopologyEngine:
         Returns:
             StructuredLayerData containing ordered LayerGroup instances.
         """
-        if mode not in ("cut_ready", "layered"):
-            raise ValueError(f"Unsupported mode: '{mode}'. Must be 'cut_ready' or 'layered'")
+        if mode not in ("cut_ready", "layered", "silhouette"):
+            raise ValueError(
+                f"Unsupported mode: '{mode}'. Must be 'cut_ready', 'layered', or 'silhouette'"
+            )
 
         if not paths:
             return StructuredLayerData(mode=mode, layers=[], dimensions=dimensions)
+
+        if mode == "silhouette":
+            w, h = dimensions
+            canvas_area = float(w * h)
+
+            # 1. Discard canvas border paths
+            remaining_paths: List[PathRecord] = []
+            for p in paths:
+                geom = self._path_to_geometry(p.path_data)
+                if geom.is_empty or geom.area <= 0:
+                    continue
+                if canvas_area > 0 and geom.area > 0.95 * canvas_area:
+                    minx, miny, maxx, maxy = geom.bounds
+                    if (
+                        abs(minx - 0.0) <= 2.0
+                        and abs(miny - 0.0) <= 2.0
+                        and abs(maxx - float(w)) <= 2.0
+                        and abs(maxy - float(h)) <= 2.0
+                    ):
+                        # Filter out canvas border bounding rectangle
+                        continue
+                remaining_paths.append(p)
+
+            if not remaining_paths:
+                return StructuredLayerData(mode=mode, layers=[], dimensions=dimensions)
+
+            # 2. Extract canonical foreground color (dominant color by area)
+            color_totals: Dict[str, float] = {}
+            for p in remaining_paths:
+                c = normalize_color_hex(p.color_hex)
+                color_totals[c] = color_totals.get(c, 0.0) + max(0.0, getattr(p, "area", 1.0))
+            canonical_color_hex = max(color_totals.items(), key=lambda kv: kv[1])[0]
+
+            # 3. Convert all remaining paths into Shapely geometries
+            geoms: List[BaseGeometry] = []
+            for p in remaining_paths:
+                g = self._path_to_geometry(p.path_data)
+                if not g.is_empty and g.area >= filter_speckle:
+                    geoms.append(g)
+
+            if not geoms:
+                return StructuredLayerData(mode=mode, layers=[], dimensions=dimensions)
+
+            # 4. Compound hole assembly: sort geometries by area descending.
+            # If a smaller polygon is contained/covered by a larger polygon, punch it out as a hole.
+            flat_geoms: List[Polygon] = []
+            for g in geoms:
+                if g.geom_type == "Polygon":
+                    flat_geoms.append(g)
+                elif g.geom_type == "MultiPolygon":
+                    flat_geoms.extend(g.geoms)
+
+            flat_geoms.sort(key=lambda g: g.area, reverse=True)
+
+            assembled_geoms: List[BaseGeometry] = []
+            consumed_indices = set()
+            for i, g_large in enumerate(flat_geoms):
+                if i in consumed_indices:
+                    continue
+                current_geom = g_large
+                for j in range(i + 1, len(flat_geoms)):
+                    if j in consumed_indices:
+                        continue
+                    g_small = flat_geoms[j]
+                    if (
+                        current_geom.contains(g_small) or current_geom.covers(g_small)
+                    ) and current_geom.area > g_small.area:
+                        diff = current_geom.difference(g_small)
+                        diff_extracted = _extract_polygonal_geometry(make_valid(diff))
+                        if not diff_extracted.is_empty and diff_extracted.area > 0:
+                            current_geom = diff_extracted
+                            consumed_indices.add(j)
+                assembled_geoms.append(current_geom)
+
+            # 5. Perform unary_union across all geometries, followed by make_valid
+            unioned = unary_union(assembled_geoms)
+            valid_geom = _extract_polygonal_geometry(make_valid(unioned))
+
+            if valid_geom.is_empty or valid_geom.area <= 0:
+                return StructuredLayerData(mode=mode, layers=[], dimensions=dimensions)
+
+            # 6. Convert resulting Polygon or MultiPolygon back into SVG path data
+            d = self.polygon_to_path_data(valid_geom)
+            path_record = PathRecord(
+                path_id="layer01_path01",
+                id="layer01_path01",
+                path_data=d,
+                color_hex=canonical_color_hex,
+                area=float(valid_geom.area),
+                fill_rule="evenodd",
+            )
+            layer_01 = LayerGroup(
+                layer_id="layer_01",
+                label=f"01 - {canonical_color_hex}",
+                z_index=1,
+                color_hex=canonical_color_hex,
+                paths=[path_record],
+            )
+            return StructuredLayerData(layers=[layer_01], dimensions=dimensions, mode="silhouette")
 
         # 1. Group paths by normalized color_hex and merge perceptually similar colors
         color_areas: Dict[str, float] = {}
