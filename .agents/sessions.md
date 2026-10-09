@@ -2,6 +2,24 @@
 
 > **CRITICAL RULE:** All new entries MUST be prepended directly below this block. When an agent wakes up, it reads the top entry. When it sleeps, it writes the top entry.
 
+## 2026-10-09 10:15 | Antigravity (IDE) | [inkmcp] Improvement Protocol Execution & Invariant 55 Codification
+**Agent**: Antigravity (IDE) / Orchestrator
+**Host OS**: Windows (pwsh, Python 3.13.15, Inkscape 1.4.4)
+**Branch**: `windows-mcp`
+**Working Tree**: Clean & Governance Codified
+
+### Completed This Session
+- **Improvement Protocol Execution ✅**:
+  - Phase 0 Bootstrap: Resolved project improvement artifacts in `.agents/` and global config.
+  - Phase 1 & 2 Postmortems: Compiled and logged 4 postmortems (`PM-2026-1009-001` through `PM-2026-1009-004`) covering behavioral delegation stall, `inkex.command.call` CLI flag translation bug, headless backend parameter unpacking asymmetry, and worker thread exception swallowing.
+  - Phase 3 Pattern Matching: Mapped 1 behavioral pattern (`GLB-015`) and 3 project runtime patterns (`PRJ-002`, `PRJ-003`, `PRJ-004`).
+  - Phase 4 User Approval: Interactively presented and secured user approval for all improvement plans.
+  - Phase 5 Codification:
+    - Added **Invariant 55** to `.agents/INFRASTRUCTURE_INVARIANTS.md` ("Single-Concern Subagent Slicing & Concurrent Tester Swarm Mandate").
+    - Added role **Parallel Swarm Tester** (Role 10) to `.agents/AGENTS.md`.
+    - Added pattern entries to `.agents/PATTERN_LIBRARY.yaml` (`GLB-015`, `PRJ-002`, `PRJ-003`, `PRJ-004`).
+    - Appended structured postmortems to `.agents/improvement-log.jsonl`.
+
 ## 2026-10-09 10:10 | Antigravity (IDE) | [inkmcp] Live Testing, Export Subprocess Hardening & 4-Agent Parallel Swarm Verification (180/180 Green)
 **Agent**: Antigravity (IDE) / Orchestrator & Parallel Test Swarms
 **Host OS**: Windows (pwsh, Python 3.13.15, Inkscape 1.4.4)

@@ -308,3 +308,52 @@ patterns:
   - session: conversation://762f0a11-c9a7-4945-ac4e-4eedd3f90773
     date: '2026-09-29'
     postmortem_ref: PM-2026-0929-006
+- id: GLB-015
+  name: Single-Concern Subagent Slicing & Concurrent Tester Swarm Mandate
+  failure_type: behavioral
+  root_cause_category: monolithic_subagent_task_assignment
+  description: Orchestrator must not assign multi-stage sequential pipelines (reproduction + bug fixing + multi-suite testing + verification) to a single subagent, causing silent stalls. Verifications must be sliced into atomic units and fanned out across concurrent specialized tester swarms.
+  escalation_level: 2
+  current_mitigation: mechanical_invariant — Invariant 55 in INFRASTRUCTURE_INVARIANTS.md
+  mitigation_target: s:/Github/inkmcp/.agents/INFRASTRUCTURE_INVARIANTS.md
+  occurrences:
+  - session: conversation://30850e01-bbf0-4c4b-947c-5bfc2ae18213
+    date: '2026-10-09'
+    postmortem_ref: PM-2026-1009-001
+- id: PRJ-002
+  name: Inkex Command CLI Flag Translation Collision
+  failure_type: logic
+  root_cause_category: inkex_cli_flag_collision
+  description: inkex.command.call auto-converts all Python kwargs into CLI flags (--key=val), crashing external commands when kwargs like timeout=30 are passed. Use standard library subprocess.run directly for process control options.
+  escalation_level: 1
+  current_mitigation: advisory — use subprocess.run with creationflags and timeout instead of inkex.command.call
+  mitigation_target: s:/Github/inkmcp/inkmcp/inkmcpops/export_operations.py
+  occurrences:
+  - session: conversation://30850e01-bbf0-4c4b-947c-5bfc2ae18213
+    date: '2026-10-09'
+    postmortem_ref: PM-2026-1009-002
+- id: PRJ-003
+  name: Headless Backend Parameter Unpacking Asymmetry
+  failure_type: design
+  root_cause_category: parameter_unpacking_mismatch
+  description: HeadlessBackend.execute_operation expected parameters nested under attributes dict, ignoring top-level geometric arguments from CLI and MCP callers. Backend executors must merge params.get('attributes', {}) with top-level keys.
+  escalation_level: 1
+  current_mitigation: advisory — merge attributes dict with top-level kwargs in backend handlers
+  mitigation_target: s:/Github/inkmcp/inkmcp/backends/headless.py
+  occurrences:
+  - session: conversation://30850e01-bbf0-4c4b-947c-5bfc2ae18213
+    date: '2026-10-09'
+    postmortem_ref: PM-2026-1009-003
+- id: PRJ-004
+  name: Worker Thread Unhandled Exception Swallowing in Procedural Execution
+  failure_type: logic
+  root_cause_category: thread_exception_swallowing
+  description: Worker threads running execute_code swallowed unhandled user script exceptions without populating result_data['errors'], erroneously reporting success. Worker threads must capture sys.exc_info() and populate error payloads.
+  escalation_level: 1
+  current_mitigation: advisory — capture thread exceptions into shared list and populate result_data['errors']
+  mitigation_target: s:/Github/inkmcp/inkmcp/inkmcpops/execute_operations.py
+  occurrences:
+  - session: conversation://30850e01-bbf0-4c4b-947c-5bfc2ae18213
+    date: '2026-10-09'
+    postmortem_ref: PM-2026-1009-004
+

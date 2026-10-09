@@ -91,3 +91,10 @@ The following mechanical invariants are binding safety rules enforced across ses
      - **Subpath De-duplication**: Removing internal hole subpaths (`Z M ...`) from compound paths rather than generating synthetic polygon patches.
   3. **Collaborative GUI Boundary**: When organic artistic decisions (e.g. custom wood grain, decorative styling, freehand shading) are required, the agent MUST recognize the boundary of automated code generation, provide clean layer scaffolding, and hand off fine-grained artistic node editing to the human partner via the live Inkscape session.
 
+## Invariant 55: Single-Concern Subagent Slicing & Concurrent Tester Swarm Mandate
+- **Rule**: When delegating work to subagents:
+  1. **Zero Monolithic Work Orders**: The Orchestrator MUST NOT delegate multi-phase sequential pipelines (e.g., bug reproduction + code fixing + multi-suite unit testing + live manual verification) into a single monolithic subagent. Work orders must be sliced into atomic, single-concern units with intermediate checkpoints.
+  2. **Concurrent Tester Swarms ("More Testers, Not Less")**: When verifying features, bug fixes, or audit resolutions, the Orchestrator MUST NOT run tests as a single slow sequential pipeline. The Orchestrator MUST partition the verification space by domain (e.g., Live CLI, Boundary Invariants, Host Integrations, Server/Backends) and fan out to a concurrent swarm of specialized tester subagents running simultaneously.
+  3. **Subagent Execution Latency Bound**: Subagents must not execute long multi-tool sequences silently. If a subagent's scope exceeds 3 distinct stages, the Orchestrator must decompose it before dispatch.
+
+

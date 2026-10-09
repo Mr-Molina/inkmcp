@@ -41,6 +41,11 @@ This document defines the multi-agent roles, responsibilities, and delegation st
 - **Primary Function**: Multi-layer verification and certification of network endpoints, directory mappings, and physical hardware status.
 - **Tools / Capabilities**: Physical layer probing, directory cross-referencing, read-back verification gates.
 
+### 10. Parallel Swarm Tester
+- **Primary Function**: Executes concurrent, domain-partitioned automated tests and live command validations in parallel with other testers ("More testers, not less").
+- **Tools / Capabilities**: pytest test runners, subprocess CLI validation, live desktop introspection, exit code assertions.
+- **Rules**: Must operate within an isolated, single-concern test domain; must verify exit code 0 and empirical pass metrics before reporting back to Orchestrator.
+
 ## Mandatory Execution Standards
 
 ### Windows PowerShell Syntax & Command Safety
