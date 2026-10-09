@@ -120,7 +120,11 @@ class HeadlessSvgBackend(InkscapeBackend):
 
             elif op_type == "execute_code":
                 from inkmcp.inkmcpops.execute_operations import execute_code
-                res = execute_code(self._creator, svg_root, operation_data)
+                attrs = dict(operation_data.get("attributes", {})) if isinstance(operation_data.get("attributes"), dict) else {}
+                for k, v in operation_data.items():
+                    if k not in ("attributes", "tag", "operation"):
+                        attrs.setdefault(k, v)
+                res = execute_code(self._creator, svg_root, attrs)
                 if (
                     isinstance(res, dict)
                     and res.get("status") == "success"
@@ -133,7 +137,11 @@ class HeadlessSvgBackend(InkscapeBackend):
 
             elif op_type == "export_document_image":
                 from inkmcp.inkmcpops.export_operations import export_document_image
-                return export_document_image(self._creator, svg_root, operation_data)
+                attrs = dict(operation_data.get("attributes", {})) if isinstance(operation_data.get("attributes"), dict) else {}
+                for k, v in operation_data.items():
+                    if k not in ("attributes", "tag", "operation"):
+                        attrs.setdefault(k, v)
+                return export_document_image(self._creator, svg_root, attrs)
 
             else:
                 return {

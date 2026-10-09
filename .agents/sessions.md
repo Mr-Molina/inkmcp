@@ -2,7 +2,28 @@
 
 > **CRITICAL RULE:** All new entries MUST be prepended directly below this block. When an agent wakes up, it reads the top entry. When it sleeps, it writes the top entry.
 
-## 2026-10-08 17:50 | Antigravity (IDE) | [inkmcp] Multi-Wave Deep Code Audit & 24 Defect Remediation Complete (178/178 Tests Green)
+## 2026-10-09 10:10 | Antigravity (IDE) | [inkmcp] Live Testing, Export Subprocess Hardening & 4-Agent Parallel Swarm Verification (180/180 Green)
+**Agent**: Antigravity (IDE) / Orchestrator & Parallel Test Swarms
+**Host OS**: Windows (pwsh, Python 3.13.15, Inkscape 1.4.4)
+**Branch**: `windows-mcp`
+**Working Tree**: Clean & Certified (180 tests passing)
+
+### Completed This Session
+- **Live Capability & Showcase Verification ✅**:
+  - Executed `showcase_paces.py` against live Inkscape 1.4.4: verified procedural canvas reset, 16-petal trigonometric rosette via `execute-code`, semantic HUD telemetry cards, document topology introspection (`get-info`), and desktop GUI sync + high-res PNG export (`test_artwork.png`, 63.5 KB).
+- **Runtime Bug Isolation & Hardening ✅**:
+  - Fixed `export_operations.py`: Replaced legacy `inkex.command.call` with native `subprocess.run` with `CREATE_NO_WINDOW`, eliminating CLI flag translation collision (`--timeout=30`).
+  - Fixed `headless.py`: Supported both top-level and nested `attributes` dicts in `execute_operation`.
+  - Fixed `execute_operations.py`: Added `inkex` to execution globals and captured worker thread exceptions.
+  - Added new regression tests for process failure and timeout handling in `tests/test_export_operations.py`.
+- **4-Agent Parallel Testing Swarm Certification ✅**:
+  - Swarm Tester 1 (Live CLI): 4/4 live commands passed against real Inkscape with exit code 0 (`get-info`, `circle`, `rect`, `export-document-image`).
+  - Swarm Tester 2 (Invariants): 26/26 boundary condition invariant tests passed (`test_wave1_invariants.py`).
+  - Swarm Tester 3 (Blender Hybrid): 27/27 tests passed across hybrid execution, AST sandboxing, and projection math.
+  - Swarm Tester 4 (Server & Backends): 62/62 tests passed across FastMCP server, Windows CLI, headless backend, and export operations.
+  - Full pytest regression suite: 180/180 passed (exit code 0).
+
+---
 **Agent**: Antigravity (IDE) / Orchestrator & Multi-Agent Committee
 **Host OS**: Windows (pwsh, Python 3.13.15)
 **Branch**: `windows-mcp`

@@ -1,5 +1,6 @@
 import json
 import tempfile
+import subprocess
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 import pytest
@@ -106,9 +107,10 @@ def test_headless_backend_unknown_operation(headless_backend):
 
 
 def test_headless_backend_export_document_image(headless_backend):
-    with patch("inkmcp.inkmcpops.export_operations.call") as mock_call, \
+    with patch("inkmcp.inkmcpops.export_operations.subprocess.run") as mock_run, \
          patch("os.path.exists", return_value=True), \
          patch("os.path.getsize", return_value=1234):
+        mock_run.return_value = subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
         export_op = {
             "operation": "export_document_image",
             "format": "png",
@@ -118,4 +120,4 @@ def test_headless_backend_export_document_image(headless_backend):
         assert res["status"] == "success"
         assert res["data"]["format"] == "png"
         assert res["data"]["file_size"] == 1234
-        mock_call.assert_called_once()
+        mock_run.assert_called_once()

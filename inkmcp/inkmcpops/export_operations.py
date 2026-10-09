@@ -5,7 +5,7 @@ import base64
 import os
 import re
 from typing import Dict, Any
-from inkex.command import call
+import subprocess
 from inkmcp.platform_utils import find_inkscape_executable
 from .common import create_success_response, create_error_response
 
@@ -125,14 +125,27 @@ def export_document_image(extension_instance, svg, attributes: Dict[str, Any]) -
                 dpi = int((max_size / width) * 96)
 
         inkscape_bin = str(find_inkscape_executable() or "inkscape")
+        cmd = [
+            inkscape_bin,
+            f'--export-type={format_type}',
+            f'--export-filename={output_path}',
+            f'--export-dpi={dpi}',
+            export_area,
+            temp_svg,
+        ]
+        creationflags = 0x08000000 if os.name == 'nt' else 0
         try:
-            call(inkscape_bin,
-                 f'--export-type={format_type}',
-                 f'--export-filename={output_path}',
-                 f'--export-dpi={dpi}',
-                 export_area,
-                 temp_svg,
-                 timeout=30)
+            res = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=30,
+                creationflags=creationflags,
+            )
+            if res.returncode != 0:
+                return create_error_response(f"Inkscape export failed: {res.stderr.strip() or res.stdout.strip()}")
+        except subprocess.TimeoutExpired:
+            return create_error_response("Inkscape export timed out after 30 seconds")
         except Exception as e:
             return create_error_response(f"Inkscape export failed: {e}")
 

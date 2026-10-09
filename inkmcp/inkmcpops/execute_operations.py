@@ -125,6 +125,7 @@ def execute_code(extension_instance, svg, attributes: Dict[str, Any]) -> Dict[st
             from inkex.elements._base import ShapeElement
 
             execution_globals.update({
+                'inkex': inkex,
                 # Shape elements (most common)
                 'Rectangle': Rectangle,
                 'Circle': Circle,
@@ -204,12 +205,16 @@ def execute_code(extension_instance, svg, attributes: Dict[str, Any]) -> Dict[st
         timeout_seconds = float(attributes.get('timeout', 15.0))
 
         try:
+            exec_exception = []
             def _run_exec():
-                if return_output:
-                    with redirect_stdout(stdout_capture), redirect_stderr(stderr_capture):
+                try:
+                    if return_output:
+                        with redirect_stdout(stdout_capture), redirect_stderr(stderr_capture):
+                            exec(code, execution_globals, execution_locals)
+                    else:
                         exec(code, execution_globals, execution_locals)
-                else:
-                    exec(code, execution_globals, execution_locals)
+                except Exception as e:
+                    exec_exception.append((e, traceback.format_exc()))
             
             import threading
             thread = threading.Thread(target=_run_exec, daemon=True)
@@ -218,6 +223,10 @@ def execute_code(extension_instance, svg, attributes: Dict[str, Any]) -> Dict[st
 
             if thread.is_alive():
                 result_data["errors"] = f"Execution error: Timeout after {timeout_seconds} seconds"
+                result_data["execution_successful"] = False
+            elif exec_exception:
+                e, tb = exec_exception[0]
+                result_data["errors"] = f"Execution error: {str(e)}\n\nTraceback:\n{tb}"
                 result_data["execution_successful"] = False
             else:
                 result_data["execution_successful"] = True
