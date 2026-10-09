@@ -66,6 +66,47 @@ def apply_bilateral_filter(
     return Image.fromarray(arr.astype(np.uint8), mode="RGBA")
 
 
+def compute_otsu_threshold(
+    distances: np.ndarray, min_threshold: float = 25.0
+) -> float:
+    """Computes the optimal binary threshold using Otsu's method on a distance map.
+
+    Calculates between-class variance across 256 histogram bins and selects the
+    threshold that maximizes separation between foreground and background, clamped
+    to min_threshold as a lower bound.
+    """
+    if distances.size == 0 or np.all(distances == distances[0]):
+        return min_threshold
+
+    max_val = max(255.0, float(np.max(distances)))
+    hist, bin_edges = np.histogram(distances, bins=256, range=(0.0, max_val))
+    total = distances.size
+
+    # Probability mass function
+    p = hist.astype(np.float64) / total
+
+    # Cumulative sums of class weights
+    w0 = np.cumsum(p)
+    w1 = 1.0 - w0
+
+    bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2.0
+    mu_k = np.cumsum(p * bin_centers)
+    mu_t = mu_k[-1]
+
+    valid = (w0 > 1e-6) & (w1 > 1e-6)
+    if not np.any(valid):
+        return min_threshold
+
+    # Between-class variance: (mu_t * w0 - mu_k)^2 / (w0 * w1)
+    variance = np.zeros_like(p)
+    variance[valid] = ((mu_t * w0[valid] - mu_k[valid]) ** 2) / (w0[valid] * w1[valid])
+
+    best_idx = np.argmax(variance)
+    threshold = float(bin_centers[best_idx])
+
+    return max(threshold, min_threshold)
+
+
 class ImagePreprocessor:
     """Preprocesses bitmap images for vectorization workflows."""
 
@@ -88,9 +129,19 @@ class ImagePreprocessor:
         remove_background: bool = False,
         mode: str = "cut_ready",
     ) -> PreprocessedImageData:
-        """Process an input image: validate color count, remove background, smooth edges,
+        """Process an input image for vectorization.
 
-        quantize palette, and generate per-color binary masks.
+        Args:
+            image_input: File path (str or Path) or PIL.Image.Image instance.
+            num_colors: Target number of colors for quantization (2-32). Ignored in silhouette mode.
+            remove_background: If True, detects background from corner pixels and makes it transparent.
+            mode: Processing mode - "cut_ready" (default, multi-color quantization),
+                "layered", or "silhouette" (Otsu-binarized single foreground layer with
+                transparent background and compound hole preservation).
+
+        Returns:
+            PreprocessedImageData containing cleaned RGBA image, palette, color masks,
+            and dimensions.
         """
         if mode != "silhouette":
             if not (2 <= num_colors <= 32):
@@ -137,10 +188,15 @@ class ImagePreprocessor:
                             axis=-1,
                         )
                     )
-                    threshold = max(self.bg_tolerance, 25.0)
-                    fg_mask = (diff > threshold) & (arr[:, :, 3] > 0)
+                    min_thresh = max(self.bg_tolerance, 25.0)
+                    opaque_mask = arr[:, :, 3] > 0
+                    threshold = compute_otsu_threshold(
+                        diff[opaque_mask], min_threshold=min_thresh
+                    )
+                    fg_mask = (diff > threshold) & opaque_mask
                 else:
                     fg_mask = arr[:, :, 3] > 0
+
 
             if not np.any(fg_mask):
                 cleaned_arr = np.zeros((height, width, 4), dtype=np.uint8)

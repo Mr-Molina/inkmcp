@@ -1,8 +1,9 @@
 import pytest
-from PIL import Image
+from PIL import Image, ImageDraw
 from pathlib import Path
 import numpy as np
 from inkmcp.vectorizer import ImagePreprocessor, PreprocessedImageData
+
 
 
 
@@ -188,5 +189,43 @@ def test_preprocessor_silhouette_subtle_corner_noise():
     assert arr[0, 0, 3] == 0
     assert arr[79, 79, 3] == 0
     assert arr[40, 40, 3] == 255
+
+
+def test_preprocessor_silhouette_otsu_bimodal_gradient():
+    from inkmcp.vectorizer.preprocessor import compute_otsu_threshold
+
+    # Synthetic bimodal data: background cluster around 5, foreground cluster around 220
+    np.random.seed(42)
+    bg_distances = np.random.normal(loc=5.0, scale=2.0, size=1000)
+    fg_distances = np.random.normal(loc=220.0, scale=15.0, size=1000)
+    # Add gradient ramp values between 30 and 190
+    ramp = np.linspace(30.0, 190.0, 100)
+    combined = np.concatenate([bg_distances, fg_distances, ramp])
+    combined = np.clip(combined, 0.0, 255.0)
+
+    thresh = compute_otsu_threshold(combined, min_threshold=25.0)
+    # Optimal Otsu threshold must lie in the valley between the two peaks (70..150)
+    assert 70.0 < thresh < 150.0
+
+    # Image-level test: White canvas with black subject and antialiased gray fringe
+    img = Image.new("RGBA", (100, 100), (255, 255, 255, 255))
+    draw = ImageDraw.Draw(img)
+    # Inner solid black circle
+    draw.ellipse([30, 30, 70, 70], fill=(0, 0, 0, 255))
+    # Intermediate gray fringe ring around it
+    draw.ellipse([27, 27, 73, 73], outline=(150, 150, 150, 255), width=2)
+
+    prep = ImagePreprocessor()
+    result = prep.process(img, mode="silhouette")
+
+    assert len(result.palette) == 1
+    assert result.palette[0] == "#000000"
+    arr = np.array(result.image)
+    # Corners are transparent background
+    assert arr[0, 0, 3] == 0
+    # Center is solid foreground
+    assert arr[50, 50, 3] == 255
+    assert tuple(arr[50, 50, :3]) == (0, 0, 0)
+
 
 
