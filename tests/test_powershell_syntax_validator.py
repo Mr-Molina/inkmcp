@@ -1,4 +1,3 @@
-import pytest
 import sys
 from pathlib import Path
 
@@ -7,7 +6,7 @@ agents_dir = Path(__file__).parent.parent / ".agents"
 if str(agents_dir) not in sys.path:
     sys.path.insert(0, str(agents_dir))
 
-from validate_powershell_cmd import validate_command
+from validate_powershell_cmd import validate_command  # noqa: E402
 
 class TestPowerShellSyntaxValidator:
     def test_valid_simple_commands(self):

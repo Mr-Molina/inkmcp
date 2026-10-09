@@ -489,8 +489,8 @@ class VTracerCore:
         colormode: str = "color",
         hierarchical: str = "cutout",
         filter_speckle: int = 4,
-        corner_threshold: int = 60,
-        segment_length: int = 4,
+        corner_threshold: int = 30,
+        segment_length: float = 2.0,
         mode: str = "spline",
         **kwargs: Any,
     ) -> RawVectorResult:
@@ -501,13 +501,29 @@ class VTracerCore:
             colormode: Color mode ("color" or "binary").
             hierarchical: Hierarchical layering mode ("cutout" or "stacked").
             filter_speckle: Minimum pixel patch area threshold for noise filtering.
-            corner_threshold: Threshold angle for corner detection.
-            segment_length: Curve fitting threshold (mapped to vtracer length_threshold).
+            corner_threshold: Threshold angle for corner detection (default 30, or 25 for binary).
+            segment_length: Curve fitting threshold (mapped to vtracer length_threshold, default 2.0).
             mode: Curve mode ("spline", "polygon", "none").
             **kwargs: Extra parameters passed to vtracer.
         """
         temp_input_path: Optional[str] = None
         dimensions: Tuple[int, int] = (0, 0)
+
+        if colormode == "binary" and corner_threshold == 30:
+            corner_threshold = 25
+
+        def _prepare_image_for_tracing(pil_img: Image.Image) -> Image.Image:
+            if colormode == "binary":
+                has_alpha = (
+                    pil_img.mode in ("RGBA", "LA")
+                    or "A" in pil_img.getbands()
+                    or (pil_img.mode == "P" and "transparency" in pil_img.info)
+                )
+                if has_alpha:
+                    rgba = pil_img.convert("RGBA")
+                    white_bg = Image.new("RGBA", rgba.size, (255, 255, 255, 255))
+                    return Image.alpha_composite(white_bg, rgba).convert("RGB")
+            return pil_img
 
         # Resolve image input and dimensions
         if isinstance(image_input, (str, Path)):
@@ -515,20 +531,34 @@ class VTracerCore:
             if not input_path_obj.exists():
                 raise FileNotFoundError(f"Image file not found: {image_input}")
             with Image.open(input_path_obj) as img:
+                img.load()
                 dimensions = img.size
-            file_to_trace = str(input_path_obj)
+                prepared = _prepare_image_for_tracing(img)
+                if prepared is not img:
+                    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f_in:
+                        temp_input_path = f_in.name
+                    prepared.save(temp_input_path, format="PNG")
+                    file_to_trace = temp_input_path
+                else:
+                    file_to_trace = str(input_path_obj)
         elif isinstance(image_input, Image.Image):
             dimensions = image_input.size
+            prepared = _prepare_image_for_tracing(image_input)
             with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f_in:
                 temp_input_path = f_in.name
-            image_input.save(temp_input_path, format="PNG")
+            prepared.save(temp_input_path, format="PNG")
             file_to_trace = temp_input_path
         elif isinstance(image_input, (bytes, bytearray)):
             with Image.open(io.BytesIO(image_input)) as img:
+                img.load()
                 dimensions = img.size
+                prepared = _prepare_image_for_tracing(img)
             with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f_in:
                 temp_input_path = f_in.name
-                f_in.write(image_input)
+                if prepared is not img:
+                    prepared.save(temp_input_path, format="PNG")
+                else:
+                    f_in.write(image_input)
             file_to_trace = temp_input_path
         else:
             raise TypeError(

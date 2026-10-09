@@ -1,7 +1,5 @@
-import os
 from pathlib import Path
 import stat
-from unittest.mock import patch
 import pytest
 
 from inkmcp.install_extension import install_extension, check_extension_status, main

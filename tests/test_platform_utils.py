@@ -3,7 +3,6 @@ import os
 import sys
 from pathlib import Path
 from unittest.mock import patch, MagicMock
-import pytest
 
 from inkmcp.platform_utils import (
     get_operating_system,

@@ -1,8 +1,5 @@
-import json
-import tempfile
 import subprocess
-from pathlib import Path
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 import pytest
 
 from inkmcp.backends.headless import HeadlessSvgBackend

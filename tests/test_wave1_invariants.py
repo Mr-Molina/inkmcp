@@ -23,7 +23,6 @@ implemented across Wave 1:
 
 import ast
 import json
-import os
 import subprocess
 import sys
 import time
@@ -42,12 +41,12 @@ if str(REPO_ROOT) not in sys.path:
 if str(AGENTS_DIR) not in sys.path:
     sys.path.insert(0, str(AGENTS_DIR))
 
-from inkmcp.inkmcpops.execute_operations import (
+from inkmcp.inkmcpops.execute_operations import (  # noqa: E402
     _validate_code_safety,
     execute_code,
     _DANGEROUS_ATTRIBUTES,
 )
-from inkmcp import inkmcpcli
+from inkmcp import inkmcpcli  # noqa: E402
 
 
 # ==============================================================================
@@ -438,7 +437,6 @@ class TestInspectDesktopWindowsReadOnly:
         import inspect_desktop_windows
 
         DESKTOP_READOBJECTS = 0x0001
-        BANNED_WRITE_RIGHTS = 0x0002 | 0x0004 | 0x0010 | 0x0020 | 0x0040 | 0x0080 | 0x0100
 
         captured_rights = []
         original_open_desktop = inspect_desktop_windows.u32.OpenDesktopW

@@ -19,7 +19,7 @@ import pytest
 from unittest.mock import MagicMock, patch
 
 # Re-export mock classes from conftest so tests can reference them directly
-from tests.conftest import MockVector, MockMatrix
+from tests.conftest import MockVector
 
 
 # ---------------------------------------------------------------------------

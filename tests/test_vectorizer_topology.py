@@ -2,9 +2,10 @@
 
 import re
 import pytest
+from PIL import Image, ImageDraw
 from shapely.geometry import Polygon
 
-from inkmcp.vectorizer.core import PathRecord
+from inkmcp.vectorizer.core import PathRecord, VTracerCore
 from inkmcp.vectorizer.topology import LayerGroup, StructuredLayerData, TopologyEngine
 
 
@@ -319,3 +320,59 @@ def test_topology_silhouette_mode_isolates_watermark():
     geom = engine.paths_to_polygon(result.layers[0].paths)
     assert geom.geom_type in ("MultiPolygon", "GeometryCollection")
     assert len(geom.geoms) == 2
+
+
+def test_topology_silhouette_preserves_bezier_curves():
+    """Verify silhouette mode preserves native cubic Bezier ('C') curves without polygon linearization."""
+    outer_bezier = "M 10 50 C 10 20 20 10 50 10 C 80 10 90 20 90 50 C 90 80 80 90 50 90 C 20 90 10 80 10 50 Z"
+    inner_bezier = "M 30 50 C 30 35 35 30 50 30 C 65 30 70 35 70 50 C 70 65 65 70 50 70 C 35 70 30 65 30 50 Z"
+    paths = [
+        PathRecord(path_id="p1", path_data=outer_bezier, color_hex="#123456", area=5000.0),
+        PathRecord(path_id="p2", path_data=inner_bezier, color_hex="#123456", area=1200.0),
+    ]
+
+    engine = TopologyEngine()
+    result = engine.process(
+        paths,
+        mode="silhouette",
+        dimensions=(100, 100),
+        canonical_color="#123456",
+    )
+
+    assert result.mode == "silhouette"
+    assert len(result.layers) == 1
+    assert result.layers[0].color_hex == "#123456"
+    assert len(result.layers[0].paths) == 1
+
+    path_data = result.layers[0].paths[0].path_data
+    # Assert cubic Bezier curve command ' C ' is preserved
+    assert " C " in path_data
+    # Assert curve has not been replaced by thousands of linear 'L' segments
+    linear_l_count = len(re.findall(r"\bL\b", path_data))
+    assert linear_l_count == 0, f"Expected 0 flat linear 'L' segments, found {linear_l_count}"
+    # Both outer and inner Bezier segments should be present
+    bezier_c_count = len(re.findall(r"\bC\b", path_data))
+    assert bezier_c_count == 8  # 4 from outer, 4 from inner
+
+
+def test_vtracer_crisp_corner_threshold():
+    """Verify sharp acute corners are preserved with crisp corner_threshold."""
+    img = Image.new("RGB", (100, 100), (255, 255, 255))
+    draw = ImageDraw.Draw(img)
+    # Sharp diamond / star with 4 points
+    pts = [(50, 10), (60, 50), (90, 50), (60, 60), (50, 90), (40, 60), (10, 50), (40, 50)]
+    draw.polygon(pts, fill=(0, 0, 0))
+
+    core = VTracerCore()
+    res = core.vectorize(
+        img,
+        colormode="binary",
+        corner_threshold=25,
+        segment_length=2.0,
+    )
+    assert len(res.path_records) >= 1
+    d = res.path_records[0].path_data
+    # Assert sharp apex corner at (50, 10) is preserved as an exact vertex
+    assert "50 10" in d
+    assert " C " in d or "L" in d
+

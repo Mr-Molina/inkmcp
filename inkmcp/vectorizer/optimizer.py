@@ -135,10 +135,39 @@ class SvgOptimizer:
             opts.indent_depth = 2
             opts.digits = precision
 
-            return scour.scour.scourString(svg_content, opts)
+            scoured = scour.scour.scourString(svg_content, opts)
+            return self._propagate_fill_rule_to_paths(scoured)
         except Exception as e:
             logger.warning("Scour SVG optimization failed, returning unoptimized SVG: %s", e)
             return svg_content
+
+    @staticmethod
+    def _propagate_fill_rule_to_paths(svg_str: str) -> str:
+        """Ensure child <path> elements explicitly retain fill-rule from parent <g>.
+
+        Scour hoists common fill-rule attributes to parent <g> elements.
+        Primitive CAM/cutter software (Cricut Design Space, LaserGRBL) requires
+        fill-rule directly on <path> tags to render cutout holes correctly.
+        """
+        def _replace_group(match: re.Match) -> str:
+            group_open = match.group(1)
+            rule = match.group(2)
+            body = match.group(3)
+
+            def _add_fill_rule(p_match: re.Match) -> str:
+                path_tag = p_match.group(0)
+                if "fill-rule=" not in path_tag:
+                    return f'<path fill-rule="{rule}"'
+                return path_tag
+
+            updated_body = re.sub(r"<path\b", _add_fill_rule, body)
+            return f"{group_open}{updated_body}</g>"
+
+        pattern = re.compile(
+            r'(<g\b[^>]*\bfill-rule="([^"]+)"[^>]*>)(.*?)(</g>)',
+            re.DOTALL,
+        )
+        return pattern.sub(_replace_group, svg_str)
 
     def build_and_optimize(
         self,

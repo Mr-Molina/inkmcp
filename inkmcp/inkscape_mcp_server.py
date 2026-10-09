@@ -479,6 +479,8 @@ async def vectorize_image(
     output_path: Optional[str] = None,
     denoise: bool = True,
     remove_background: bool = False,
+    corner_threshold: Optional[int] = None,
+    segment_length: Optional[float] = None,
 ) -> str:
     """Vectorize a raster image into a structured SVG document.
 
@@ -504,6 +506,8 @@ async def vectorize_image(
                    If not specified, a temporary file path is generated.
     - denoise: Whether to apply bilateral filter denoising before quantization (default: True).
     - remove_background: Whether to remove dominant uniform background color (default: False).
+    - corner_threshold: Optional threshold angle for corner detection (e.g. 25-30 for sharp corners).
+    - segment_length: Optional curve fitting segment length threshold (default: 2.0).
 
     Returns:
         Markdown-formatted summary including status emoji, file path, layer breakdown,
@@ -541,6 +545,10 @@ async def vectorize_image(
         "denoise": denoise,
         "remove_background": remove_background,
     }
+    if corner_threshold is not None:
+        params["corner_threshold"] = corner_threshold
+    if segment_length is not None:
+        params["segment_length"] = segment_length
 
     try:
         from inkmcp.inkmcpops import vectorize_image_operation

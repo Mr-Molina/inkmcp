@@ -645,6 +645,7 @@ def parse_vectorize_params(raw_params: Any) -> Dict[str, Any]:
     Parse vectorize-image CLI parameters from list of tokens, string, or JSON.
     Preserves paths with spaces without stripping or improper truncation.
     Supported modes: 'cut_ready', 'layered', 'silhouette'.
+    Supported tuning: 'corner_threshold', 'segment_length', 'filter_speckle', 'smoothness'.
     """
     if raw_params is None:
         return {}
@@ -909,7 +910,7 @@ Examples:
   python inkmcpcli.py circle -f circle_params.txt
 
   # Vectorize image into cut decal or layered SVG (modes: cut_ready, layered, silhouette)
-  python inkmcpcli.py vectorize-image "image_path=art.png mode=silhouette output_path=art.svg"
+  python inkmcpcli.py vectorize-image "image_path=art.png mode=silhouette output_path=art.svg corner_threshold=25 segment_length=2.0"
 
   # Get selection info
   python inkmcpcli.py get-selection ""

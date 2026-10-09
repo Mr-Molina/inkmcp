@@ -6,7 +6,6 @@ polluting sys.modules for the rest of the session.
 """
 
 import sys
-import os
 import pytest
 from unittest.mock import MagicMock
 

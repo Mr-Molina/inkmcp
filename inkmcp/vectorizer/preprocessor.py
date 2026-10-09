@@ -2,7 +2,7 @@
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Tuple, Union
+from typing import Dict, List, Optional, Tuple, Union
 
 import numpy as np
 from PIL import Image
@@ -17,6 +17,7 @@ class PreprocessedImageData:
     palette: List[str]
     color_masks: Dict[str, Image.Image]
     dimensions: Tuple[int, int]
+    processed_image: Optional[Image.Image] = None
 
 
 def apply_bilateral_filter(
@@ -30,6 +31,9 @@ def apply_bilateral_filter(
     Noise is smoothed while sharp contrast boundaries are preserved.
     The alpha channel is preserved as-is.
     """
+    if diameter <= 0:
+        return img.copy()
+
     arr = np.array(img, dtype=np.float32)
     rgb = arr[:, :, :3]
     h, w, _ = rgb.shape
@@ -128,6 +132,7 @@ class ImagePreprocessor:
         num_colors: int = 8,
         remove_background: bool = False,
         mode: str = "cut_ready",
+        denoise: bool = True,
     ) -> PreprocessedImageData:
         """Process an input image for vectorization.
 
@@ -138,10 +143,11 @@ class ImagePreprocessor:
             mode: Processing mode - "cut_ready" (default, multi-color quantization),
                 "layered", or "silhouette" (Otsu-binarized single foreground layer with
                 transparent background and compound hole preservation).
+            denoise: Whether to apply bilateral filter denoising (default: True).
 
         Returns:
             PreprocessedImageData containing cleaned RGBA image, palette, color masks,
-            and dimensions.
+            dimensions, and processed_image.
         """
         if mode != "silhouette":
             if not (2 <= num_colors <= 32):
@@ -160,12 +166,16 @@ class ImagePreprocessor:
         width, height = img.size
 
         if mode == "silhouette":
-            filtered_img = apply_bilateral_filter(
-                img,
-                diameter=self.filter_diameter,
-                sigma_color=self.sigma_color,
-                sigma_space=self.sigma_space,
-            )
+            if self.filter_diameter > 0 and denoise:
+                filtered_img = apply_bilateral_filter(
+                    img,
+                    diameter=self.filter_diameter,
+                    sigma_color=self.sigma_color,
+                    sigma_space=self.sigma_space,
+                )
+            else:
+                filtered_img = img.copy()
+
             arr = np.array(filtered_img)
             corner_coords = [
                 (0, 0),
@@ -197,14 +207,15 @@ class ImagePreprocessor:
                 else:
                     fg_mask = arr[:, :, 3] > 0
 
-
             if not np.any(fg_mask):
                 cleaned_arr = np.zeros((height, width, 4), dtype=np.uint8)
+                blank_proc = Image.new("RGB", (width, height), (255, 255, 255))
                 return PreprocessedImageData(
                     image=Image.fromarray(cleaned_arr, mode="RGBA"),
                     palette=[],
                     color_masks={},
                     dimensions=(width, height),
+                    processed_image=blank_proc,
                 )
 
             orig_arr = np.array(img)
@@ -218,6 +229,11 @@ class ImagePreprocessor:
             cleaned_arr[fg_mask, 3] = 255
             cleaned_image = Image.fromarray(cleaned_arr, mode="RGBA")
 
+            # Binary tracing image: foreground is black [0, 0, 0], background is white [255, 255, 255]
+            binary_arr = np.full((height, width, 3), 255, dtype=np.uint8)
+            binary_arr[fg_mask] = [0, 0, 0]
+            processed_image = Image.fromarray(binary_arr, mode="RGB")
+
             palette = [canonical_hex]
             color_masks = {
                 canonical_hex: Image.fromarray(
@@ -230,8 +246,8 @@ class ImagePreprocessor:
                 palette=palette,
                 color_masks=color_masks,
                 dimensions=(width, height),
+                processed_image=processed_image,
             )
-
 
         # Background removal if requested
         if remove_background:
@@ -247,12 +263,15 @@ class ImagePreprocessor:
                 img = Image.fromarray(arr, mode="RGBA")
 
         # Edge-preserving bilateral filtering
-        filtered_img = apply_bilateral_filter(
-            img,
-            diameter=self.filter_diameter,
-            sigma_color=self.sigma_color,
-            sigma_space=self.sigma_space,
-        )
+        if self.filter_diameter > 0 and denoise:
+            filtered_img = apply_bilateral_filter(
+                img,
+                diameter=self.filter_diameter,
+                sigma_color=self.sigma_color,
+                sigma_space=self.sigma_space,
+            )
+        else:
+            filtered_img = img.copy()
 
         arr = np.array(filtered_img)
         alpha = arr[:, :, 3]

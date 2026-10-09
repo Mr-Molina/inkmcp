@@ -5,7 +5,6 @@ and serialize_context_variables skipping local callables (functions, lambdas, cl
 """
 
 import math
-import pytest
 from inkmcp.inkmcpcli import (
     parse_hybrid_blocks,
     serialize_context_variables,
@@ -96,7 +95,7 @@ class TestSerializeContextVariables:
         def sample_func(x):
             return x * 2
 
-        sample_lambda = lambda y: y + 1
+        sample_lambda = lambda y: y + 1  # noqa: E731
 
         class SampleClass:
             def sample_method(self):

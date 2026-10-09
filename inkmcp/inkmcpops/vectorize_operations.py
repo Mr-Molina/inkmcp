@@ -106,9 +106,29 @@ def vectorize_image_operation(
         except (ValueError, TypeError):
             color_tolerance = 5.0
 
-        # Map smoothness multiplier to VTracer curve fitting thresholds
-        segment_length = max(1, int(round(4 * smoothness)))
-        corner_threshold = max(1, min(180, int(round(60 * smoothness))))
+        if mode == "silhouette":
+            colormode = "binary"
+            ct_val = params.get("corner_threshold")
+            corner_threshold = int(ct_val) if ct_val is not None else 25
+            sl_val = params.get("segment_length")
+            segment_length = float(sl_val) if sl_val is not None else 2.0
+        else:
+            colormode = "color"
+            if "corner_threshold" in params and params["corner_threshold"] is not None:
+                try:
+                    corner_threshold = int(params["corner_threshold"])
+                except (ValueError, TypeError):
+                    corner_threshold = max(1, min(180, int(round(30 * smoothness))))
+            else:
+                corner_threshold = max(1, min(180, int(round(30 * smoothness))))
+
+            if "segment_length" in params and params["segment_length"] is not None:
+                try:
+                    segment_length = float(params["segment_length"])
+                except (ValueError, TypeError):
+                    segment_length = max(0.5, float(2.0 * smoothness))
+            else:
+                segment_length = max(0.5, float(2.0 * smoothness))
 
         denoise = _parse_bool(params.get("denoise", True), default=True)
         remove_background = _parse_bool(params.get("remove_background", False), default=False)
@@ -116,7 +136,13 @@ def vectorize_image_operation(
         output_path = params.get("output_path")
 
         # 3. Preprocess raster image
-        preprocessor = ImagePreprocessor()
+        preprocessor_kwargs = {}
+        if "filter_diameter" in params and params["filter_diameter"] is not None:
+            try:
+                preprocessor_kwargs["filter_diameter"] = int(params["filter_diameter"])
+            except (ValueError, TypeError):
+                pass
+        preprocessor = ImagePreprocessor(**preprocessor_kwargs)
         try:
             preprocessed = preprocessor.process(
                 str(image_path_obj),
@@ -145,6 +171,7 @@ def vectorize_image_operation(
         filter_speckle_int = max(0, int(round(filter_speckle)))
         raw_vector = core.vectorize(
             img_to_vectorize,
+            colormode=colormode,
             hierarchical=hierarchical,
             filter_speckle=filter_speckle_int,
             corner_threshold=corner_threshold,
@@ -153,12 +180,14 @@ def vectorize_image_operation(
 
         # 5. Restructure geometry into layer topology
         topology = TopologyEngine()
+        canonical_color = preprocessed.palette[0] if preprocessed.palette else None
         structured_data = topology.process(
             paths=raw_vector.path_records,
             mode=mode,
             dimensions=preprocessed.dimensions,
             filter_speckle=filter_speckle,
             color_tolerance=color_tolerance,
+            canonical_color=canonical_color,
         )
 
         # 6. Build and optimize SVG markup
