@@ -228,4 +228,24 @@ def test_preprocessor_silhouette_otsu_bimodal_gradient():
     assert tuple(arr[50, 50, :3]) == (0, 0, 0)
 
 
+def test_preprocessor_silhouette_subpixel_scale():
+    """Verify silhouette mode with subpixel_scale=2 upscales processed_image while preserving 1x output dimensions."""
+    img = Image.new("RGBA", (100, 100), (255, 255, 255, 255))
+    draw = ImageDraw.Draw(img)
+    draw.ellipse([20, 20, 80, 80], fill=(226, 131, 11, 255))
+
+    prep = ImagePreprocessor()
+    result = prep.process(img, mode="silhouette", subpixel_scale=2)
+
+    assert result.subpixel_scale == 2
+    assert result.dimensions == (100, 100)
+    assert result.image.size == (100, 100)
+    assert result.processed_image is not None
+    assert result.processed_image.size == (200, 200)
+    assert len(result.palette) == 1
+    assert result.palette[0] == "#E2830B"
+    assert result.color_masks["#E2830B"].size == (100, 100)
+
+
+
 

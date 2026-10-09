@@ -5,6 +5,7 @@ from inkmcp.vectorizer.core import (
     RawVectorResult,
     VTracerCore,
     apply_translate_to_svg_path,
+    scale_svg_path_coordinates,
 )
 from inkmcp.vectorizer.optimizer import OptimizedSvgResult, SvgOptimizer
 from inkmcp.vectorizer.palette import (
@@ -23,6 +24,7 @@ __all__ = [
     "RawVectorResult",
     "VTracerCore",
     "apply_translate_to_svg_path",
+    "scale_svg_path_coordinates",
     "LayerGroup",
     "StructuredLayerData",
     "TopologyEngine",

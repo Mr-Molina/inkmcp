@@ -260,3 +260,28 @@ def test_vectorize_operation_silhouette_mode(tmp_path: Path):
     layer = result["data"]["layers"][0]
     assert layer["layer_id"] == "layer_01"
 
+
+def test_vectorize_operation_silhouette_with_subpixel_scale(tmp_path: Path):
+    """Verify silhouette mode with subpixel_scale=2 outputs 1x dimensions in SVG markup."""
+    import xml.etree.ElementTree as ET
+    img_path = tmp_path / "subpixel_test.png"
+    out_svg = tmp_path / "subpixel_test.svg"
+    _create_sample_image(img_path)
+
+    params = {
+        "image_path": str(img_path),
+        "output_path": str(out_svg),
+        "mode": "silhouette",
+        "subpixel_scale": 2,
+        "inject_to_inkscape": False,
+    }
+    result = vectorize_image_operation(params, backend=None)
+    assert result["status"] == "success"
+
+    tree = ET.parse(str(out_svg))
+    root = tree.getroot()
+    # Check width and height attributes in root SVG element match 60, not 120
+    assert root.attrib.get("width") == "60"
+    assert root.attrib.get("height") == "60"
+
+

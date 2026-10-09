@@ -106,29 +106,35 @@ def vectorize_image_operation(
         except (ValueError, TypeError):
             color_tolerance = 5.0
 
-        if mode == "silhouette":
-            colormode = "binary"
-            ct_val = params.get("corner_threshold")
-            corner_threshold = int(ct_val) if ct_val is not None else 25
-            sl_val = params.get("segment_length")
-            segment_length = float(sl_val) if sl_val is not None else 2.0
-        else:
-            colormode = "color"
-            if "corner_threshold" in params and params["corner_threshold"] is not None:
-                try:
-                    corner_threshold = int(params["corner_threshold"])
-                except (ValueError, TypeError):
-                    corner_threshold = max(1, min(180, int(round(30 * smoothness))))
-            else:
-                corner_threshold = max(1, min(180, int(round(30 * smoothness))))
+        try:
+            subpixel_scale = int(
+                params.get("subpixel_scale", 2 if mode == "silhouette" else 1)
+            )
+        except (ValueError, TypeError):
+            subpixel_scale = 2 if mode == "silhouette" else 1
+        subpixel_scale = max(1, subpixel_scale)
 
-            if "segment_length" in params and params["segment_length"] is not None:
-                try:
-                    segment_length = float(params["segment_length"])
-                except (ValueError, TypeError):
-                    segment_length = max(0.5, float(2.0 * smoothness))
+        try:
+            if "corner_threshold" in params and params["corner_threshold"] is not None:
+                corner_threshold = int(params["corner_threshold"])
+            elif smoothness != 1.0:
+                corner_threshold = max(1, min(180, int(round(60 * smoothness))))
             else:
-                segment_length = max(0.5, float(2.0 * smoothness))
+                corner_threshold = 60
+        except (ValueError, TypeError):
+            corner_threshold = 60
+
+        try:
+            if "segment_length" in params and params["segment_length"] is not None:
+                segment_length = float(params["segment_length"])
+            elif smoothness != 1.0:
+                segment_length = max(0.5, float(4.0 * smoothness))
+            else:
+                segment_length = 4.0
+        except (ValueError, TypeError):
+            segment_length = 4.0
+
+        colormode = "binary" if mode == "silhouette" else "color"
 
         denoise = _parse_bool(params.get("denoise", True), default=True)
         remove_background = _parse_bool(params.get("remove_background", False), default=False)
@@ -143,21 +149,14 @@ def vectorize_image_operation(
             except (ValueError, TypeError):
                 pass
         preprocessor = ImagePreprocessor(**preprocessor_kwargs)
-        try:
-            preprocessed = preprocessor.process(
-                str(image_path_obj),
-                num_colors=num_colors,
-                denoise=denoise,
-                remove_background=remove_background,
-                mode=mode,
-            )
-        except TypeError:
-            preprocessed = preprocessor.process(
-                str(image_path_obj),
-                num_colors=num_colors,
-                remove_background=remove_background,
-                mode=mode,
-            )
+        preprocessed = preprocessor.process(
+            str(image_path_obj),
+            num_colors=num_colors,
+            denoise=denoise,
+            remove_background=remove_background,
+            mode=mode,
+            subpixel_scale=subpixel_scale,
+        )
 
         hierarchical = str(params.get("hierarchical", "cutout")).strip().lower()
         if hierarchical not in ("cutout", "stacked"):
@@ -169,13 +168,19 @@ def vectorize_image_operation(
             preprocessed, "image", None
         )
         filter_speckle_int = max(0, int(round(filter_speckle)))
+        scaled_segment_length = segment_length * (
+            float(subpixel_scale) if subpixel_scale > 1 else 1.0
+        )
+        scale_factor = (1.0 / subpixel_scale) if subpixel_scale > 1 else 1.0
+
         raw_vector = core.vectorize(
             img_to_vectorize,
             colormode=colormode,
             hierarchical=hierarchical,
             filter_speckle=filter_speckle_int,
             corner_threshold=corner_threshold,
-            segment_length=segment_length,
+            segment_length=scaled_segment_length,
+            scale_factor=scale_factor,
         )
 
         # 5. Restructure geometry into layer topology

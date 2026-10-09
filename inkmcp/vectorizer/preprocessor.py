@@ -18,6 +18,7 @@ class PreprocessedImageData:
     color_masks: Dict[str, Image.Image]
     dimensions: Tuple[int, int]
     processed_image: Optional[Image.Image] = None
+    subpixel_scale: int = 1
 
 
 def apply_bilateral_filter(
@@ -116,12 +117,13 @@ class ImagePreprocessor:
 
     def __init__(
         self,
-        filter_diameter: int = 5,
+        filter_diameter: Optional[int] = None,
         sigma_color: float = 25.0,
         sigma_space: float = 25.0,
         bg_tolerance: float = 20.0,
     ) -> None:
-        self.filter_diameter = filter_diameter
+        self._filter_diameter_override = filter_diameter
+        self.filter_diameter = 5 if filter_diameter is None else filter_diameter
         self.sigma_color = sigma_color
         self.sigma_space = sigma_space
         self.bg_tolerance = bg_tolerance
@@ -133,6 +135,7 @@ class ImagePreprocessor:
         remove_background: bool = False,
         mode: str = "cut_ready",
         denoise: bool = True,
+        subpixel_scale: int = 1,
     ) -> PreprocessedImageData:
         """Process an input image for vectorization.
 
@@ -144,10 +147,11 @@ class ImagePreprocessor:
                 "layered", or "silhouette" (Otsu-binarized single foreground layer with
                 transparent background and compound hole preservation).
             denoise: Whether to apply bilateral filter denoising (default: True).
+            subpixel_scale: Subpixel upscaling factor for curve antialiasing (default: 1).
 
         Returns:
             PreprocessedImageData containing cleaned RGBA image, palette, color masks,
-            dimensions, and processed_image.
+            dimensions, processed_image, and subpixel_scale.
         """
         if mode != "silhouette":
             if not (2 <= num_colors <= 32):
@@ -166,22 +170,37 @@ class ImagePreprocessor:
         width, height = img.size
 
         if mode == "silhouette":
-            if self.filter_diameter > 0 and denoise:
+            filt_diam = (
+                self._filter_diameter_override
+                if self._filter_diameter_override is not None
+                else 3
+            )
+
+            if subpixel_scale > 1:
+                scaled_w = width * subpixel_scale
+                scaled_h = height * subpixel_scale
+                working_img = img.resize((scaled_w, scaled_h), Image.LANCZOS)
+            else:
+                scaled_w = width
+                scaled_h = height
+                working_img = img
+
+            if filt_diam > 0 and denoise:
                 filtered_img = apply_bilateral_filter(
-                    img,
-                    diameter=self.filter_diameter,
+                    working_img,
+                    diameter=filt_diam,
                     sigma_color=self.sigma_color,
                     sigma_space=self.sigma_space,
                 )
             else:
-                filtered_img = img.copy()
+                filtered_img = working_img.copy()
 
             arr = np.array(filtered_img)
             corner_coords = [
                 (0, 0),
-                (max(0, width - 1), 0),
-                (0, max(0, height - 1)),
-                (max(0, width - 1), max(0, height - 1)),
+                (max(0, scaled_w - 1), 0),
+                (0, max(0, scaled_h - 1)),
+                (max(0, scaled_w - 1), max(0, scaled_h - 1)),
             ]
             corners = [arr[y, x] for x, y in corner_coords]
             transparent_corners = [c for c in corners if c[3] == 0]
@@ -209,37 +228,49 @@ class ImagePreprocessor:
 
             if not np.any(fg_mask):
                 cleaned_arr = np.zeros((height, width, 4), dtype=np.uint8)
-                blank_proc = Image.new("RGB", (width, height), (255, 255, 255))
+                blank_proc = Image.new("RGB", (scaled_w, scaled_h), (255, 255, 255))
                 return PreprocessedImageData(
                     image=Image.fromarray(cleaned_arr, mode="RGBA"),
                     palette=[],
                     color_masks={},
                     dimensions=(width, height),
                     processed_image=blank_proc,
+                    subpixel_scale=subpixel_scale,
                 )
 
-            orig_arr = np.array(img)
-            fg_pixels = orig_arr[fg_mask, :3]
+            work_arr = np.array(working_img)
+            fg_pixels = work_arr[fg_mask, :3]
             median_rgb = np.median(fg_pixels, axis=0)
             r, g, b = [int(np.clip(np.round(c), 0, 255)) for c in median_rgb]
             canonical_hex = f"#{r:02X}{g:02X}{b:02X}"
 
-            cleaned_arr = np.zeros((height, width, 4), dtype=np.uint8)
-            cleaned_arr[fg_mask, :3] = [r, g, b]
-            cleaned_arr[fg_mask, 3] = 255
-            cleaned_image = Image.fromarray(cleaned_arr, mode="RGBA")
-
             # Binary tracing image: foreground is black [0, 0, 0], background is white [255, 255, 255]
-            binary_arr = np.full((height, width, 3), 255, dtype=np.uint8)
+            binary_arr = np.full((scaled_h, scaled_w, 3), 255, dtype=np.uint8)
             binary_arr[fg_mask] = [0, 0, 0]
             processed_image = Image.fromarray(binary_arr, mode="RGB")
 
+            # Cleaned image at original (width, height)
+            if subpixel_scale > 1:
+                mask_scaled = Image.fromarray((fg_mask * 255).astype(np.uint8), mode="L")
+                mask_orig = mask_scaled.resize((width, height), Image.BILINEAR)
+                fg_orig_mask = np.array(mask_orig) > 127
+                cleaned_arr = np.zeros((height, width, 4), dtype=np.uint8)
+                cleaned_arr[fg_orig_mask, :3] = [r, g, b]
+                cleaned_arr[fg_orig_mask, 3] = 255
+                cleaned_image = Image.fromarray(cleaned_arr, mode="RGBA")
+                color_masks = {canonical_hex: mask_orig}
+            else:
+                cleaned_arr = np.zeros((height, width, 4), dtype=np.uint8)
+                cleaned_arr[fg_mask, :3] = [r, g, b]
+                cleaned_arr[fg_mask, 3] = 255
+                cleaned_image = Image.fromarray(cleaned_arr, mode="RGBA")
+                color_masks = {
+                    canonical_hex: Image.fromarray(
+                        (fg_mask * 255).astype(np.uint8), mode="L"
+                    )
+                }
+
             palette = [canonical_hex]
-            color_masks = {
-                canonical_hex: Image.fromarray(
-                    (fg_mask * 255).astype(np.uint8), mode="L"
-                )
-            }
 
             return PreprocessedImageData(
                 image=cleaned_image,
@@ -247,6 +278,7 @@ class ImagePreprocessor:
                 color_masks=color_masks,
                 dimensions=(width, height),
                 processed_image=processed_image,
+                subpixel_scale=subpixel_scale,
             )
 
         # Background removal if requested
@@ -285,6 +317,7 @@ class ImagePreprocessor:
                 palette=[],
                 color_masks={},
                 dimensions=(width, height),
+                subpixel_scale=subpixel_scale,
             )
 
         pixels_to_cluster = rgb[opaque_mask]
@@ -332,4 +365,5 @@ class ImagePreprocessor:
             palette=palette,
             color_masks=color_masks,
             dimensions=(width, height),
+            subpixel_scale=subpixel_scale,
         )

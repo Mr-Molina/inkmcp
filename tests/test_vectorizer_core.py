@@ -5,7 +5,12 @@ from pathlib import Path
 from PIL import Image, ImageDraw
 import pytest
 
-from inkmcp.vectorizer.core import PathRecord, RawVectorResult, VTracerCore
+from inkmcp.vectorizer.core import (
+    PathRecord,
+    RawVectorResult,
+    VTracerCore,
+    scale_svg_path_coordinates,
+)
 
 
 def test_path_record_and_raw_vector_result_dataclasses():
@@ -207,5 +212,58 @@ def test_vtracer_silhouette_binary_cutout_config():
     res = core.vectorize(img, hierarchical="cutout", filter_speckle=4)
     assert len(res.paths) >= 1
     assert res.paths[0].color_hex.upper() == "#E2830B"
+
+
+def test_scale_svg_path_coordinates():
+    """Verify scale_svg_path_coordinates scales SVG paths accurately across commands."""
+    # Test identity
+    assert scale_svg_path_coordinates("", 0.5) == ""
+    assert scale_svg_path_coordinates("M 10 20 L 30 40 Z", 1.0) == "M 10 20 L 30 40 Z"
+
+    # Test scaling down (0.5x)
+    path_in = "M 20 40 C 40 60 80 100 120 160 Z"
+    scaled = scale_svg_path_coordinates(path_in, 0.5)
+    assert scaled == "M 10 20 C 20 30 40 50 60 80 Z"
+
+    # Test scaling up (2x)
+    scaled_up = scale_svg_path_coordinates("M 5 10 L 15 20 H 25 V 30 Z", 2.0)
+    assert scaled_up == "M 10 20 L 30 40 H 50 V 60 Z"
+
+    # Test arc command: rx, ry, x, y scaled, flags/rotation unchanged
+    arc_path = "M 10 10 A 20 30 45 1 0 50 60 Z"
+    scaled_arc = scale_svg_path_coordinates(arc_path, 0.5)
+    assert scaled_arc == "M 5 5 A 10 15 45 1 0 25 30 Z"
+
+
+def test_vtracer_vectorize_scale_factor():
+    """Verify VTracerCore scales path coordinates and dimensions when scale_factor is set."""
+    # Create 80x80 image
+    img = Image.new("RGB", (80, 80), (255, 255, 255))
+    draw = ImageDraw.Draw(img)
+    draw.rectangle([20, 20, 60, 60], fill=(0, 0, 0))
+
+    core = VTracerCore()
+    # Scale factor 0.5 should reduce dimensions to 40x40 and scale path coordinates
+    res = core.vectorize(
+        img,
+        colormode="binary",
+        scale_factor=0.5,
+    )
+    assert res.dimensions == (40, 40)
+    assert len(res.path_records) >= 1
+    # Check that coordinate values in path_data are scaled to ~10..30 instead of ~20..60
+    import re
+    coords = [float(x) for x in re.findall(r"[-+]?(?:\d*\.\d+|\d+)", res.path_records[0].path_data)]
+    assert max(coords) < 35.0
+
+
+def test_vtracer_vectorize_default_parameters():
+    """Verify default corner_threshold is 60 and segment_length is 4.0."""
+    import inspect
+    sig = inspect.signature(VTracerCore.vectorize)
+    assert sig.parameters["corner_threshold"].default == 60
+    assert sig.parameters["segment_length"].default == 4.0
+    assert sig.parameters["scale_factor"].default == 1.0
+
 
 

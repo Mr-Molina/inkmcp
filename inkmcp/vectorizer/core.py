@@ -241,6 +241,60 @@ def apply_translate_to_svg_path(d: str, tx: float, ty: float) -> str:
     return " ".join(result)
 
 
+def scale_svg_path_coordinates(d: str, scale_factor: float) -> str:
+    """Scales numeric coordinates in SVG path data by scale_factor."""
+    if not d or not d.strip() or scale_factor == 1.0:
+        return d
+
+    tokens = re.findall(
+        r"[MmLlHhVvCcSsQqTtAaZz]|[-+]?(?:\d*\.\d+|\d+)(?:[eE][-+]?\d+)?", d
+    )
+    if not tokens:
+        return d
+
+    result: List[str] = []
+    idx = 0
+    current_cmd = ""
+
+    while idx < len(tokens):
+        token = tokens[idx]
+        if token.isalpha():
+            current_cmd = token
+            result.append(current_cmd)
+            idx += 1
+            continue
+
+        if current_cmd in ("A", "a"):
+            if idx + 6 < len(tokens):
+                rx = float(tokens[idx]) * scale_factor
+                ry = float(tokens[idx + 1]) * scale_factor
+                x_rot = tokens[idx + 2]
+                large_arc = tokens[idx + 3]
+                sweep = tokens[idx + 4]
+                x = float(tokens[idx + 5]) * scale_factor
+                y = float(tokens[idx + 6]) * scale_factor
+                result.extend([
+                    _format_coord(rx),
+                    _format_coord(ry),
+                    x_rot,
+                    large_arc,
+                    sweep,
+                    _format_coord(x),
+                    _format_coord(y),
+                ])
+                idx += 7
+            else:
+                idx += 1
+        elif current_cmd in ("Z", "z"):
+            idx += 1
+        else:
+            val = float(token) * scale_factor
+            result.append(_format_coord(val))
+            idx += 1
+
+    return " ".join(result)
+
+
 def parse_svg_path_to_rings(
     d: str, samples_per_curve: int = 8
 ) -> List[List[Tuple[float, float]]]:
@@ -489,9 +543,10 @@ class VTracerCore:
         colormode: str = "color",
         hierarchical: str = "cutout",
         filter_speckle: int = 4,
-        corner_threshold: int = 30,
-        segment_length: float = 2.0,
+        corner_threshold: int = 60,
+        segment_length: float = 4.0,
         mode: str = "spline",
+        scale_factor: float = 1.0,
         **kwargs: Any,
     ) -> RawVectorResult:
         """Vectorizes an input image into SVG markup and structured path records.
@@ -501,16 +556,14 @@ class VTracerCore:
             colormode: Color mode ("color" or "binary").
             hierarchical: Hierarchical layering mode ("cutout" or "stacked").
             filter_speckle: Minimum pixel patch area threshold for noise filtering.
-            corner_threshold: Threshold angle for corner detection (default 30, or 25 for binary).
-            segment_length: Curve fitting threshold (mapped to vtracer length_threshold, default 2.0).
+            corner_threshold: Threshold angle for corner detection (default 60).
+            segment_length: Curve fitting threshold (mapped to vtracer length_threshold, default 4.0).
             mode: Curve mode ("spline", "polygon", "none").
+            scale_factor: Optional scaling factor for path coordinates and dimensions (default 1.0).
             **kwargs: Extra parameters passed to vtracer.
         """
         temp_input_path: Optional[str] = None
         dimensions: Tuple[int, int] = (0, 0)
-
-        if colormode == "binary" and corner_threshold == 30:
-            corner_threshold = 25
 
         def _prepare_image_for_tracing(pil_img: Image.Image) -> Image.Image:
             if colormode == "binary":
@@ -614,6 +667,12 @@ class VTracerCore:
             except (ValueError, TypeError):
                 pass
 
+        if scale_factor != 1.0:
+            dimensions = (
+                int(round(dimensions[0] * scale_factor)),
+                int(round(dimensions[1] * scale_factor)),
+            )
+
         path_records: List[PathRecord] = []
         path_idx = 1
 
@@ -626,6 +685,8 @@ class VTracerCore:
                 transform_attr = elem.attrib.get("transform")
                 tx, ty = parse_svg_transform_translate(transform_attr)
                 path_data = apply_translate_to_svg_path(raw_d, tx, ty)
+                if scale_factor != 1.0:
+                    path_data = scale_svg_path_coordinates(path_data, scale_factor)
 
                 area = calculate_svg_path_area(path_data)
                 if area <= 0.0:
@@ -647,6 +708,22 @@ class VTracerCore:
                 )
                 path_records.append(record)
                 path_idx += 1
+
+        if scale_factor != 1.0:
+            root.attrib["width"] = str(dimensions[0])
+            root.attrib["height"] = str(dimensions[1])
+            root.attrib["viewBox"] = f"0 0 {dimensions[0]} {dimensions[1]}"
+            for elem in root.iter():
+                if elem.tag.endswith("path") or elem.tag == "path":
+                    raw_d = elem.attrib.get("d", "").strip()
+                    if raw_d:
+                        elem_t = elem.attrib.get("transform")
+                        tx, ty = parse_svg_transform_translate(elem_t)
+                        if elem_t:
+                            elem.attrib.pop("transform", None)
+                        abs_d = apply_translate_to_svg_path(raw_d, tx, ty)
+                        elem.attrib["d"] = scale_svg_path_coordinates(abs_d, scale_factor)
+            svg_string = ET.tostring(root, encoding="unicode")
 
         return RawVectorResult(
             svg_string=svg_string,
