@@ -274,3 +274,91 @@ def test_format_vectorize_response_variations():
     fmt_error = format_vectorize_response(error_res)
     assert "❌" in fmt_error
     assert "bad.png" in fmt_error
+
+
+def test_cli_vectorize_silhouette(tmp_path: Path):
+    """Test CLI execution with mode=silhouette creates a single-layer decal SVG."""
+    img_path = tmp_path / "silhouette_cli.png"
+    out_svg = tmp_path / "silhouette_cli.svg"
+    _create_sample_image(img_path)
+
+    cmd = [
+        sys.executable,
+        "-m",
+        "inkmcp.inkmcpcli",
+        "vectorize-image",
+        f"image_path={img_path}",
+        "mode=silhouette",
+        f"output_path={out_svg}",
+        "inject_to_inkscape=false",
+    ]
+    res = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", check=False)
+    assert res.returncode == 0, f"CLI invocation failed: {res.stderr}\nstdout: {res.stdout}"
+    assert out_svg.exists(), f"Expected output SVG was not created: {out_svg}"
+    assert out_svg.stat().st_size > 0
+    assert "✅" in res.stdout
+    assert "1 layers" in res.stdout or "1 layer" in res.stdout
+
+
+def test_cli_vectorize_invalid_mode(tmp_path: Path):
+    """Test CLI returns exit code 1 when an invalid mode is specified."""
+    img_path = tmp_path / "invalid_mode.png"
+    _create_sample_image(img_path)
+
+    cmd = [
+        sys.executable,
+        "-m",
+        "inkmcp.inkmcpcli",
+        "vectorize-image",
+        f"image_path={img_path}",
+        "mode=invalid_mode_xyz",
+        "inject_to_inkscape=false",
+    ]
+    res = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", check=False)
+    assert res.returncode == 1
+    assert "mode" in res.stderr.lower() or "mode" in res.stdout.lower()
+
+
+def test_mcp_server_vectorize_image_silhouette_mode(tmp_path: Path):
+    """Test FastMCP server vectorize_image tool with mode=silhouette."""
+    img_path = tmp_path / "server_silhouette.png"
+    out_svg = tmp_path / "server_silhouette.svg"
+    _create_sample_image(img_path)
+
+    async def _test():
+        mock_ctx = MagicMock()
+        result_md = await vectorize_image(
+            ctx=mock_ctx,
+            image_path=str(img_path),
+            output_path=str(out_svg),
+            mode="silhouette",
+            inject_to_inkscape=False,
+        )
+        assert isinstance(result_md, str)
+        assert "✅" in result_md
+        assert "silhouette" in result_md
+        assert out_svg.exists()
+        assert out_svg.stat().st_size > 0
+
+    asyncio.run(_test())
+
+
+def test_mcp_server_vectorize_image_invalid_mode(tmp_path: Path):
+    """Test FastMCP server vectorize_image tool rejects invalid mode."""
+    img_path = tmp_path / "server_invalid.png"
+    _create_sample_image(img_path)
+
+    async def _test():
+        mock_ctx = MagicMock()
+        result_md = await vectorize_image(
+            ctx=mock_ctx,
+            image_path=str(img_path),
+            mode="invalid_mode_xyz",
+            inject_to_inkscape=False,
+        )
+        assert "❌" in result_md
+        assert "mode" in result_md.lower()
+
+    asyncio.run(_test())
+
+

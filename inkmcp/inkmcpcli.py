@@ -644,6 +644,7 @@ def parse_vectorize_params(raw_params: Any) -> Dict[str, Any]:
     """
     Parse vectorize-image CLI parameters from list of tokens, string, or JSON.
     Preserves paths with spaces without stripping or improper truncation.
+    Supported modes: 'cut_ready', 'layered', 'silhouette'.
     """
     if raw_params is None:
         return {}
@@ -907,6 +908,9 @@ Examples:
   # Use file for parameters (file content replaces parameter string)
   python inkmcpcli.py circle -f circle_params.txt
 
+  # Vectorize image into cut decal or layered SVG (modes: cut_ready, layered, silhouette)
+  python inkmcpcli.py vectorize-image "image_path=art.png mode=silhouette output_path=art.svg"
+
   # Get selection info
   python inkmcpcli.py get-selection ""
 
@@ -950,6 +954,28 @@ Examples:
                 params_dict = parse_vectorize_params(file_content)
             else:
                 params_dict = parse_vectorize_params(args.params)
+
+            # Validate mode parameter if explicitly specified
+            valid_modes = ("cut_ready", "layered", "silhouette")
+            mode = params_dict.get("mode")
+            if mode is not None and str(mode).strip() not in valid_modes:
+                params_str = " ".join(args.params) if isinstance(args.params, list) else str(args.params)
+                err_msg = f"Unsupported mode: '{mode}'. Must be 'cut_ready', 'layered', or 'silhouette'"
+                if args.parse_out or args.pretty:
+                    output = {
+                        "command": f"{args.tag} {params_str}".strip(),
+                        "tag": args.tag,
+                        "status": "error",
+                        "error": err_msg,
+                        "result": {"status": "error", "message": err_msg, "data": {"error": err_msg}},
+                    }
+                    if args.pretty:
+                        print(json.dumps(output, indent=2))
+                    else:
+                        print(json.dumps(output))
+                else:
+                    print(f"❌ Error: {err_msg}", file=sys.stderr)
+                return 1
 
             try:
                 from inkmcp.inkscape_mcp_server import InkscapeConnection

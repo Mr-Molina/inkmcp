@@ -21,6 +21,9 @@ from inkmcp.vectorizer import (
 
 logger = logging.getLogger(__name__)
 
+VALID_MODES = ("cut_ready", "layered", "silhouette")
+
+
 def _create_warning_response(message: str, **data: Any) -> Dict[str, Any]:
     """Create a standardized warning response matching inkmcp common response schema."""
     response_data = {"message": message}
@@ -51,7 +54,7 @@ def vectorize_image_operation(
         params: Dictionary of parameters controlling the vectorization pipeline.
             - image_path (str, required): Path to source raster image.
             - output_path (str, optional): Target file path for SVG export.
-            - mode (str, optional): 'cut_ready' (default) or 'layered'.
+            - mode (str, optional): 'cut_ready' (default), 'layered', or 'silhouette'.
             - num_colors (int, optional): Clamped 2..32, default 8.
             - filter_speckle (float, optional): Speckle cutoff area, default 4.0.
             - smoothness (float, optional): Curve smoothness multiplier, default 1.0.
@@ -76,9 +79,9 @@ def vectorize_image_operation(
 
         # 2. Parse & sanitize parameters
         mode = str(params.get("mode", "cut_ready")).strip()
-        if mode not in ("cut_ready", "layered"):
+        if mode not in VALID_MODES:
             return create_error_response(
-                f"Unsupported mode: '{mode}'. Must be 'cut_ready' or 'layered'"
+                f"Unsupported mode: '{mode}'. Must be 'cut_ready', 'layered', or 'silhouette'"
             )
 
         try:
@@ -120,12 +123,14 @@ def vectorize_image_operation(
                 num_colors=num_colors,
                 denoise=denoise,
                 remove_background=remove_background,
+                mode=mode,
             )
         except TypeError:
             preprocessed = preprocessor.process(
                 str(image_path_obj),
                 num_colors=num_colors,
                 remove_background=remove_background,
+                mode=mode,
             )
 
         hierarchical = str(params.get("hierarchical", "cutout")).strip().lower()
@@ -149,9 +154,9 @@ def vectorize_image_operation(
         # 5. Restructure geometry into layer topology
         topology = TopologyEngine()
         structured_data = topology.process(
-            raw_vector.path_records,
+            paths=raw_vector.path_records,
             mode=mode,
-            dimensions=raw_vector.dimensions,
+            dimensions=preprocessed.dimensions,
             filter_speckle=filter_speckle,
             color_tolerance=color_tolerance,
         )

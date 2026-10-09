@@ -488,10 +488,12 @@ async def vectorize_image(
     Parameters:
     - image_path: Path to the raster image file.
     - mode: Conversion geometry mode:
-        * 'cut_ready': Boolean-subtracted non-overlapping contours with undercuts removed.
+        * 'cut_ready': Planar mosaic, zero overlap boolean-subtracted contours with undercuts removed.
                        Optimized for vinyl cutters, laser cutters, plotters, and CNC.
-        * 'layered': Stacked shapes with undercuts preserved.
+        * 'layered': Laser mandala with baseplate; stacked shapes with undercuts preserved.
                      Optimized for screen printing, illustration, and digital art.
+        * 'silhouette': Crisp single-layer decal; unified contour with compound hole preservation.
+                        Optimized for single-color cut vinyl decals, stamps, and laser engraving.
     - num_colors: Color quantization count (clamped to 2..32, default: 8).
     - filter_speckle: Minimum speckle cutoff area in square pixels (default: 4.0).
     - smoothness: Curve smoothing multiplier (default: 1.0; higher = smoother curves).
@@ -507,6 +509,10 @@ async def vectorize_image(
         Markdown-formatted summary including status emoji, file path, layer breakdown,
         node count, and injection status.
     """
+    valid_modes = ("cut_ready", "layered", "silhouette")
+    if mode not in valid_modes:
+        return f"❌ **Vectorization Failed**: Unsupported mode: '{mode}'. Must be 'cut_ready', 'layered', or 'silhouette'"
+
     try:
         loop = asyncio.get_running_loop()
     except RuntimeError:

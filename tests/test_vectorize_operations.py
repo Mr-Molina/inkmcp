@@ -234,3 +234,29 @@ def test_vectorize_operation_default_output_path(tmp_path: Path):
         os.remove(generated_path)
     except OSError:
         pass
+
+
+def test_vectorize_operation_silhouette_mode(tmp_path: Path):
+    """Test silhouette mode produces a single-layer cut decal SVG."""
+    img_path = tmp_path / "art_silhouette.png"
+    out_svg = tmp_path / "art_silhouette.svg"
+    _create_sample_image(img_path)
+
+    params = {
+        "image_path": str(img_path),
+        "output_path": str(out_svg),
+        "mode": "silhouette",
+        "inject_to_inkscape": False,
+    }
+    result = vectorize_image_operation(params, backend=None)
+
+    assert result["status"] == "success", f"Operation failed: {result}"
+    assert out_svg.exists()
+    assert out_svg.stat().st_size > 0
+    assert result["data"]["mode"] == "silhouette"
+    assert result["data"]["layer_count"] == 1
+    assert len(result["data"]["layers"]) == 1
+    assert result["data"]["total_nodes"] > 0
+    layer = result["data"]["layers"][0]
+    assert layer["layer_id"] == "layer_01"
+
