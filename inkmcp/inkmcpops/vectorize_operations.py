@@ -8,13 +8,10 @@ file export, and live Inkscape canvas injection.
 import logging
 import os
 from pathlib import Path
-import subprocess
-import sys
 import tempfile
 from typing import Any, Dict, Optional
 
 from inkmcp.inkmcpops.common import create_error_response, create_success_response
-from inkmcp.platform_utils import find_inkscape_executable, is_inkscape_process_running
 from inkmcp.vectorizer import (
     ImagePreprocessor,
     SvgOptimizer,
@@ -23,10 +20,6 @@ from inkmcp.vectorizer import (
 )
 
 logger = logging.getLogger(__name__)
-
-# Keep module references to launched background processes to avoid ResourceWarning in tests
-_ACTIVE_BACKGROUND_PROCESSES = []
-
 
 def _create_warning_response(message: str, **data: Any) -> Dict[str, Any]:
     """Create a standardized warning response matching inkmcp common response schema."""
@@ -129,6 +122,10 @@ def vectorize_image_operation(
                 remove_background=remove_background,
             )
 
+        hierarchical = str(params.get("hierarchical", "cutout")).strip().lower()
+        if hierarchical not in ("cutout", "stacked"):
+            hierarchical = "cutout"
+
         # 4. Vectorize contours via VTracer
         core = VTracerCore()
         img_to_vectorize = getattr(preprocessed, "processed_image", None) or getattr(
@@ -137,6 +134,7 @@ def vectorize_image_operation(
         filter_speckle_int = max(0, int(round(filter_speckle)))
         raw_vector = core.vectorize(
             img_to_vectorize,
+            hierarchical=hierarchical,
             filter_speckle=filter_speckle_int,
             corner_threshold=corner_threshold,
             segment_length=segment_length,
@@ -218,19 +216,6 @@ def vectorize_image_operation(
                     logger.warning("Failed injecting layers into Inkscape GUI: %s", e)
                     injected = False
 
-        # In addition to executing layer injection, also open output SVG in Inkscape GUI on Windows
-        if inject_to_inkscape and sys.platform == "win32" and is_inkscape_process_running():
-            if injected:
-                try:
-                    inkscape_bin = find_inkscape_executable() or "inkscape.com"
-                    proc = subprocess.Popen([str(inkscape_bin), resolved_output_path], shell=False)
-                    _ACTIVE_BACKGROUND_PROCESSES.append(proc)
-                    try:
-                        proc.wait(timeout=0.2)
-                    except Exception:
-                        pass
-                except Exception as e:
-                    logger.warning("Failed to open output SVG in Inkscape GUI via CLI: %s", e)
 
         # 9. Format response payload
         response_data = {

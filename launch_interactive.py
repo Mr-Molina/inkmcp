@@ -108,7 +108,8 @@ def launch_on_default_desktop(svg_path: str):
         return None
     inkscape_exe = str(inkscape_path)
 
-    cmd_str = subprocess.list2cmdline([str(inkscape_exe), str(svg_path)])
+    abs_svg_path = os.path.abspath(svg_path)
+    cmd_str = subprocess.list2cmdline([str(inkscape_exe), str(abs_svg_path)])
     cmd_buf = ctypes.create_unicode_buffer(cmd_str)
 
     res = k32.CreateProcessW(

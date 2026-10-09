@@ -466,6 +466,7 @@ class VTracerCore:
         self,
         image_input: Union[str, Path, Image.Image, bytes],
         colormode: str = "color",
+        hierarchical: str = "cutout",
         filter_speckle: int = 4,
         corner_threshold: int = 60,
         segment_length: int = 4,
@@ -477,6 +478,7 @@ class VTracerCore:
         Args:
             image_input: File path (str or Path), PIL.Image.Image, or raw bytes.
             colormode: Color mode ("color" or "binary").
+            hierarchical: Hierarchical layering mode ("cutout" or "stacked").
             filter_speckle: Minimum pixel patch area threshold for noise filtering.
             corner_threshold: Threshold angle for corner detection.
             segment_length: Curve fitting threshold (mapped to vtracer length_threshold).
@@ -523,6 +525,7 @@ class VTracerCore:
                 file_to_trace,
                 temp_output_path,
                 colormode=colormode,
+                hierarchical=hierarchical,
                 filter_speckle=filter_speckle,
                 corner_threshold=corner_threshold,
                 length_threshold=length_threshold,

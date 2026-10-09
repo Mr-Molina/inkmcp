@@ -170,3 +170,29 @@ def test_vtracer_invalid_input():
 
     with pytest.raises(TypeError):
         core.vectorize(12345)  # type: ignore[arg-type]
+
+
+def test_vtracer_hierarchical_default_and_modes():
+    """Verify VTracerCore.vectorize defaults to hierarchical='cutout' and accepts stacked."""
+    import inspect
+
+    sig = inspect.signature(VTracerCore.vectorize)
+    assert "hierarchical" in sig.parameters
+    assert sig.parameters["hierarchical"].default == "cutout"
+
+    img = Image.new("RGBA", (40, 40), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(img)
+    draw.rectangle([5, 5, 35, 35], fill=(255, 0, 0, 255))
+    draw.rectangle([15, 15, 25, 25], fill=(0, 255, 0, 255))
+
+    core = VTracerCore()
+    # Default should be cutout
+    res_default = core.vectorize(img)
+    assert len(res_default.path_records) >= 1
+
+    res_cutout = core.vectorize(img, hierarchical="cutout")
+    assert len(res_cutout.path_records) >= 1
+
+    res_stacked = core.vectorize(img, hierarchical="stacked")
+    assert len(res_stacked.path_records) >= 1
+
