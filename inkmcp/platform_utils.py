@@ -184,9 +184,9 @@ def is_inkscape_process_running() -> bool:
     os_name = get_operating_system()
     try:
         if os_name == "windows":
-            cmd = ["tasklist", "/FI", "IMAGENAME eq inkscape.exe", "/FO", "CSV", "/NH"]
+            cmd = ["tasklist", "/FI", "IMAGENAME eq inkscape*", "/FO", "CSV", "/NH"]
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=5, creationflags=0x08000000)
-            return "inkscape.exe" in result.stdout.lower()
+            return "inkscape" in result.stdout.lower()
         else:
             cmd = ["pgrep", "-f", "inkscape"]
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=5)

@@ -121,7 +121,13 @@ def capture_window_screenshot(hwnd: int, rect: RECT, output_path: str) -> bool:
         # Try PIL ImageGrab first if available for high-DPI awareness
         try:
             from PIL import ImageGrab
-            bbox = (rect.left, rect.top, rect.right, rect.bottom)
+            # Clamp negative window offsets (common in maximized Windows windows)
+            bbox = (
+                max(0, rect.left),
+                max(0, rect.top),
+                max(0, rect.right),
+                max(0, rect.bottom),
+            )
             img = ImageGrab.grab(bbox=bbox, all_screens=True)
             norm_path = Path(output_path).resolve()
             norm_path.parent.mkdir(parents=True, exist_ok=True)
@@ -293,7 +299,8 @@ def main():
     )
 
     if args.screenshot and windows:
-        target = windows[0]
+        # Select largest window by visible area to target the main application window over tooltips/popups
+        target = max(windows, key=lambda w: w["rect"]["width"] * w["rect"]["height"])
         r = RECT(
             target["rect"]["left"],
             target["rect"]["top"],

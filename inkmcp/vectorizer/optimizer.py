@@ -104,14 +104,14 @@ class SvgOptimizer:
     def optimize(
         self,
         svg_content: str,
-        precision: int = 3,
+        precision: int = 5,
         enable_scour: bool = True,
     ) -> str:
         """Optimizes SVG content using Scour while preserving Inkscape layer metadata.
 
         Args:
             svg_content: Input SVG markup string.
-            precision: Decimal precision for coordinates.
+            precision: Decimal precision for coordinates (default: 5 for high fabrication fidelity).
             enable_scour: Whether to apply Scour optimization passes.
 
         Returns:
@@ -139,7 +139,7 @@ class SvgOptimizer:
         self,
         layer_data: StructuredLayerData,
         dimensions: Optional[Tuple[int, int]] = None,
-        precision: int = 3,
+        precision: int = 5,
         enable_scour: bool = True,
     ) -> OptimizedSvgResult:
         """Builds an Inkscape layer DOM SVG and applies Scour optimization passes.
