@@ -19,11 +19,18 @@ import vtracer
 class PathRecord:
     """Vector path record extracted from SVG."""
 
-    id: str
-    color_hex: str
-    path_data: str
-    area: float
+    id: str = ""
+    color_hex: str = "#000000"
+    path_data: str = ""
+    area: float = 0.0
     fill_rule: str = "nonzero"
+    path_id: Optional[str] = None
+
+    def __post_init__(self) -> None:
+        if self.path_id and not self.id:
+            self.id = self.path_id
+        elif self.id and not self.path_id:
+            self.path_id = self.id
 
 
 @dataclass
@@ -33,6 +40,12 @@ class RawVectorResult:
     svg_string: str
     path_records: List[PathRecord]
     dimensions: Tuple[int, int]
+
+    @property
+    def paths(self) -> List[PathRecord]:
+        """Alias for path_records for convenience and backward compatibility."""
+        return self.path_records
+
 
 
 def normalize_color_hex(fill: Optional[str]) -> str:

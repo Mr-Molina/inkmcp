@@ -1,7 +1,9 @@
 import pytest
 from PIL import Image
 from pathlib import Path
+import numpy as np
 from inkmcp.vectorizer import ImagePreprocessor, PreprocessedImageData
+
 
 
 def test_preprocessor_color_bounds_validation():
@@ -110,4 +112,81 @@ def test_preprocessor_grayscale_and_fully_transparent():
     assert res_trans.palette == []
     assert res_trans.color_masks == {}
     assert res_trans.dimensions == (20, 20)
+
+
+def test_preprocessor_silhouette_mode_extracts_single_palette():
+    import numpy as np
+    from PIL import ImageDraw
+
+    # Create 100x100 white image with an orange circle
+    img = Image.new("RGBA", (100, 100), (255, 255, 255, 255))
+    draw = ImageDraw.Draw(img)
+    draw.ellipse([20, 20, 80, 80], fill=(226, 131, 11, 255))
+
+    prep = ImagePreprocessor()
+    result = prep.process(img, mode="silhouette")
+
+    # Must return exactly 1 foreground color in palette
+    assert len(result.palette) == 1
+    assert result.palette[0] == "#E2830B"
+    assert len(result.color_masks) == 1
+    assert "#E2830B" in result.color_masks
+
+    # Alpha channel must be transparent where background was white
+    arr = np.array(result.image)
+    assert arr[0, 0, 3] == 0
+    assert arr[50, 50, 3] == 255
+    # Foreground RGB must match median color
+    assert tuple(arr[50, 50, :3]) == (226, 131, 11)
+
+
+def test_preprocessor_silhouette_solid_white():
+    prep = ImagePreprocessor()
+    img = Image.new("RGBA", (50, 50), (255, 255, 255, 255))
+    result = prep.process(img, mode="silhouette")
+
+    assert result.palette == []
+    assert result.color_masks == {}
+    assert result.dimensions == (50, 50)
+    arr = np.array(result.image)
+    assert arr[:, :, 3].max() == 0
+
+
+def test_preprocessor_silhouette_solid_color():
+    prep = ImagePreprocessor()
+    img = Image.new("RGBA", (50, 50), (200, 50, 50, 255))
+    result = prep.process(img, mode="silhouette")
+
+    assert result.palette == []
+    assert result.color_masks == {}
+    assert result.dimensions == (50, 50)
+    arr = np.array(result.image)
+    assert arr[:, :, 3].max() == 0
+
+
+def test_preprocessor_silhouette_subtle_corner_noise():
+    import numpy as np
+    from PIL import ImageDraw
+
+    # 80x80 image with subtle noise across corners
+    img = Image.new("RGBA", (80, 80), (255, 255, 255, 255))
+    img.putpixel((0, 0), (254, 255, 255, 255))
+    img.putpixel((79, 0), (255, 254, 255, 255))
+    img.putpixel((0, 79), (255, 255, 254, 255))
+    img.putpixel((79, 79), (253, 254, 255, 255))
+
+    # Black square in center
+    draw = ImageDraw.Draw(img)
+    draw.rectangle([25, 25, 55, 55], fill=(10, 10, 10, 255))
+
+    prep = ImagePreprocessor()
+    result = prep.process(img, mode="silhouette")
+
+    assert len(result.palette) == 1
+    assert result.palette[0] == "#0A0A0A"
+    arr = np.array(result.image)
+    assert arr[0, 0, 3] == 0
+    assert arr[79, 79, 3] == 0
+    assert arr[40, 40, 3] == 255
+
 

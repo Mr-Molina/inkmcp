@@ -86,13 +86,15 @@ class ImagePreprocessor:
         image_input: Union[str, Path, Image.Image],
         num_colors: int = 8,
         remove_background: bool = False,
+        mode: str = "cut_ready",
     ) -> PreprocessedImageData:
         """Process an input image: validate color count, remove background, smooth edges,
 
         quantize palette, and generate per-color binary masks.
         """
-        if not (2 <= num_colors <= 32):
-            raise ValueError("num_colors must be between 2 and 32")
+        if mode != "silhouette":
+            if not (2 <= num_colors <= 32):
+                raise ValueError("num_colors must be between 2 and 32")
 
         # Load and convert image to RGBA
         if isinstance(image_input, (str, Path)):
@@ -105,6 +107,75 @@ class ImagePreprocessor:
             )
 
         width, height = img.size
+
+        if mode == "silhouette":
+            filtered_img = apply_bilateral_filter(
+                img,
+                diameter=self.filter_diameter,
+                sigma_color=self.sigma_color,
+                sigma_space=self.sigma_space,
+            )
+            arr = np.array(filtered_img)
+            corner_coords = [
+                (0, 0),
+                (max(0, width - 1), 0),
+                (0, max(0, height - 1)),
+                (max(0, width - 1), max(0, height - 1)),
+            ]
+            corners = [arr[y, x] for x, y in corner_coords]
+            transparent_corners = [c for c in corners if c[3] == 0]
+
+            if len(transparent_corners) >= 2:
+                fg_mask = arr[:, :, 3] > 0
+            else:
+                opaque_corners = [c[:3].astype(np.float32) for c in corners if c[3] > 0]
+                if opaque_corners:
+                    bg_color = np.median(opaque_corners, axis=0)
+                    diff = np.sqrt(
+                        np.sum(
+                            (arr[:, :, :3].astype(np.float32) - bg_color) ** 2,
+                            axis=-1,
+                        )
+                    )
+                    threshold = max(self.bg_tolerance, 25.0)
+                    fg_mask = (diff > threshold) & (arr[:, :, 3] > 0)
+                else:
+                    fg_mask = arr[:, :, 3] > 0
+
+            if not np.any(fg_mask):
+                cleaned_arr = np.zeros((height, width, 4), dtype=np.uint8)
+                return PreprocessedImageData(
+                    image=Image.fromarray(cleaned_arr, mode="RGBA"),
+                    palette=[],
+                    color_masks={},
+                    dimensions=(width, height),
+                )
+
+            orig_arr = np.array(img)
+            fg_pixels = orig_arr[fg_mask, :3]
+            median_rgb = np.median(fg_pixels, axis=0)
+            r, g, b = [int(np.clip(np.round(c), 0, 255)) for c in median_rgb]
+            canonical_hex = f"#{r:02X}{g:02X}{b:02X}"
+
+            cleaned_arr = np.zeros((height, width, 4), dtype=np.uint8)
+            cleaned_arr[fg_mask, :3] = [r, g, b]
+            cleaned_arr[fg_mask, 3] = 255
+            cleaned_image = Image.fromarray(cleaned_arr, mode="RGBA")
+
+            palette = [canonical_hex]
+            color_masks = {
+                canonical_hex: Image.fromarray(
+                    (fg_mask * 255).astype(np.uint8), mode="L"
+                )
+            }
+
+            return PreprocessedImageData(
+                image=cleaned_image,
+                palette=palette,
+                color_masks=color_masks,
+                dimensions=(width, height),
+            )
+
 
         # Background removal if requested
         if remove_background:

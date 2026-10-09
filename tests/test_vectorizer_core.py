@@ -196,3 +196,16 @@ def test_vtracer_hierarchical_default_and_modes():
     res_stacked = core.vectorize(img, hierarchical="stacked")
     assert len(res_stacked.path_records) >= 1
 
+
+def test_vtracer_silhouette_binary_cutout_config():
+    """Verify VTracerCore traces transparent background cutout image with single canonical color."""
+    img = Image.new("RGBA", (50, 50), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(img)
+    draw.rectangle([10, 10, 40, 40], fill=(226, 131, 11, 255))
+
+    core = VTracerCore()
+    res = core.vectorize(img, hierarchical="cutout", filter_speckle=4)
+    assert len(res.paths) >= 1
+    assert res.paths[0].color_hex.upper() == "#E2830B"
+
+
