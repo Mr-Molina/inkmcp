@@ -232,3 +232,107 @@ def test_optimizer_silhouette_fill_rule_evenodd():
     optimizer = SvgOptimizer()
     svg = optimizer.build_svg(layer_data)
     assert 'fill-rule="evenodd"' in svg
+
+
+def test_refit_circular_primitives_smooths_octagonal_button():
+    """Verifies that an octagonal/polygonal button is converted into smooth cubic Bezier arcs."""
+    btn_path = PathRecord(
+        id="btn_pocket",
+        color_hex="#000000",
+        path_data="M 96 50 L 105 50 L 108 53 L 108 62 L 103 67 L 96 67 L 91.7 62.7 L 91.7 57.1 Z",
+        area=240.0,
+        fill_rule="nonzero",
+    )
+    layer = LayerGroup(
+        layer_id="l0",
+        label="00 - Black",
+        color_hex="#000000",
+        paths=[btn_path],
+        z_index=0,
+    )
+    data = StructuredLayerData(
+        mode="cut_ready",
+        layers=[layer],
+        dimensions=(200, 200),
+    )
+
+    opt = SvgOptimizer()
+    refitted = opt.refit_circular_primitives(data)
+    refitted_path = refitted.layers[0].paths[0]
+
+    assert "C" in refitted_path.path_data
+    assert refitted_path.path_data.count("C") == 4
+
+
+def test_refit_circular_primitives_preserves_square_corners():
+    """Verifies that rectangular or square paths with 90° corners are NOT modified."""
+    square_path = PathRecord(
+        id="pocket_flap",
+        color_hex="#DFBF8B",
+        path_data="M 10 10 L 110 10 L 110 90 L 10 90 Z",
+        area=8000.0,
+        fill_rule="nonzero",
+    )
+    layer = LayerGroup(
+        layer_id="l1",
+        label="01 - Tan",
+        color_hex="#DFBF8B",
+        paths=[square_path],
+        z_index=1,
+    )
+    data = StructuredLayerData(
+        mode="cut_ready",
+        layers=[layer],
+        dimensions=(200, 200),
+    )
+
+    opt = SvgOptimizer()
+    refitted = opt.refit_circular_primitives(data)
+    refitted_path = refitted.layers[0].paths[0]
+
+    assert refitted_path.path_data == square_path.path_data
+    assert "C" not in refitted_path.path_data
+
+
+def test_regularize_svg_path_rdp_staircase_simplification():
+    """Verifies that jagged pixel staircases along shadows/walls are collapsed into a single straight line."""
+    from inkmcp.vectorizer.optimizer import regularize_svg_path_rdp
+
+    staircase_path = "M 10 10 L 20 10 L 20 11 L 30 11 L 30 12 L 40 12 C 45 15 50 20 55 25 Z"
+    result = regularize_svg_path_rdp(staircase_path, max_deviation=1.0)
+
+    assert result.startswith("M 10 10 L 40 12")
+    assert "C 45 15 50 20 55 25 Z" in result
+    assert result.count("L") == 1
+
+
+def test_refit_circular_primitives_rejects_oblong_flag_flutter():
+    """Verifies that organic/oblong shapes like flag tails are NOT falsely converted to circles."""
+    flag_flutter_path = PathRecord(
+        id="flag_tip",
+        color_hex="#EA3F2E",
+        path_data="M 400 100 L 450 110 L 440 130 L 390 120 Z",
+        area=800.0,
+        fill_rule="nonzero",
+    )
+    layer = LayerGroup(
+        layer_id="l0",
+        label="00 - Red Flag",
+        color_hex="#EA3F2E",
+        paths=[flag_flutter_path],
+        z_index=0,
+    )
+    data = StructuredLayerData(
+        mode="cut_ready",
+        layers=[layer],
+        dimensions=(500, 500),
+    )
+
+    opt = SvgOptimizer()
+    refitted = opt.refit_circular_primitives(data)
+    refitted_path = refitted.layers[0].paths[0]
+
+    assert refitted_path.path_data == flag_flutter_path.path_data
+    assert "C" not in refitted_path.path_data
+
+

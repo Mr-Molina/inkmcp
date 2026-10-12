@@ -2,13 +2,287 @@
 
 from dataclasses import dataclass
 import logging
+import math
 import re
-from typing import Optional, Tuple
+from typing import List, Optional, Tuple
 from xml.sax.saxutils import escape
 
-from inkmcp.vectorizer.topology import StructuredLayerData
+from shapely.geometry import Polygon
+from shapely.validation import make_valid
+
+from inkmcp.vectorizer.core import (
+    PathRecord,
+    parse_svg_path_to_rings,
+    _format_coord,
+)
+from inkmcp.vectorizer.topology import LayerGroup, StructuredLayerData
 
 logger = logging.getLogger(__name__)
+
+
+def is_circular_ring(
+    ring: List[Tuple[float, float]],
+    min_circularity: float = 0.82,
+    max_area: float = 1500.0,
+    min_area: float = 15.0,
+    min_aspect: float = 0.75,
+) -> Tuple[bool, float, float, float, float, bool]:
+    """Detects if a coordinate ring is a circular/elliptical primitive.
+
+    Returns:
+        (is_circular, cx, cy, rx, ry, is_ccw)
+    """
+    if len(ring) < 5:
+        return False, 0.0, 0.0, 0.0, 0.0, False
+
+    poly = Polygon(ring)
+    if not poly.is_valid:
+        poly = make_valid(poly)
+        if poly.geom_type != "Polygon":
+            return False, 0.0, 0.0, 0.0, 0.0, False
+
+    area = poly.area
+    if area < min_area or area > max_area:
+        return False, 0.0, 0.0, 0.0, 0.0, False
+
+    perimeter = poly.length
+    if perimeter == 0:
+        return False, 0.0, 0.0, 0.0, 0.0, False
+
+    circularity = 4.0 * math.pi * area / (perimeter * perimeter)
+    if circularity < min_circularity:
+        return False, 0.0, 0.0, 0.0, 0.0, False
+
+    minx, miny, maxx, maxy = poly.bounds
+    w = maxx - minx
+    h = maxy - miny
+    if w == 0 or h == 0:
+        return False, 0.0, 0.0, 0.0, 0.0, False
+
+    aspect = min(w, h) / max(w, h)
+    if aspect < min_aspect:
+        return False, 0.0, 0.0, 0.0, 0.0, False
+
+    cx = float(poly.centroid.x)
+    cy = float(poly.centroid.y)
+    rx = w / 2.0
+    ry = h / 2.0
+
+    if aspect >= 0.90:
+        r_mean = math.sqrt(area / math.pi)
+        rx = r_mean
+        ry = r_mean
+
+    is_ccw = bool(poly.exterior.is_ccw)
+    return True, cx, cy, rx, ry, is_ccw
+
+
+def generate_bezier_ellipse(
+    cx: float, cy: float, rx: float, ry: float, is_ccw: bool = False
+) -> str:
+    """Generates standard 4-arc cubic Bezier ellipse/circle."""
+    kx = 0.5522847498 * rx
+    ky = 0.5522847498 * ry
+    x0, y0 = cx, cy - ry
+
+    if is_ccw:
+        # Shapely is_ccw=True (counter-clockwise)
+        return (
+            f"M {_format_coord(x0)} {_format_coord(y0)} "
+            f"C {_format_coord(cx + kx)} {_format_coord(y0)} {_format_coord(cx + rx)} {_format_coord(cy - ky)} {_format_coord(cx + rx)} {_format_coord(cy)} "
+            f"C {_format_coord(cx + rx)} {_format_coord(cy + ky)} {_format_coord(cx + kx)} {_format_coord(cy + ry)} {_format_coord(cx)} {_format_coord(cy + ry)} "
+            f"C {_format_coord(cx - kx)} {_format_coord(cy + ry)} {_format_coord(cx - rx)} {_format_coord(cy + ky)} {_format_coord(cx - rx)} {_format_coord(cy)} "
+            f"C {_format_coord(cx - rx)} {_format_coord(cy - ky)} {_format_coord(cx - kx)} {_format_coord(y0)} {_format_coord(x0)} {_format_coord(y0)} Z"
+        )
+    else:
+        # Shapely is_ccw=False (clockwise)
+        return (
+            f"M {_format_coord(x0)} {_format_coord(y0)} "
+            f"C {_format_coord(cx - kx)} {_format_coord(y0)} {_format_coord(cx - rx)} {_format_coord(cy - ky)} {_format_coord(cx - rx)} {_format_coord(cy)} "
+            f"C {_format_coord(cx - rx)} {_format_coord(cy + ky)} {_format_coord(cx - kx)} {_format_coord(cy + ry)} {_format_coord(cx)} {_format_coord(cy + ry)} "
+            f"C {_format_coord(cx + kx)} {_format_coord(cy + ry)} {_format_coord(cx + rx)} {_format_coord(cy + ky)} {_format_coord(cx + rx)} {_format_coord(cy)} "
+            f"C {_format_coord(cx + rx)} {_format_coord(cy - ky)} {_format_coord(cx + kx)} {_format_coord(y0)} {_format_coord(x0)} {_format_coord(y0)} Z"
+        )
+
+
+def point_line_distance(
+    px: float, py: float, x1: float, y1: float, x2: float, y2: float
+) -> float:
+    """Calculates perpendicular Euclidean distance from point (px, py) to line segment (x1, y1)-(x2, y2)."""
+    dx = x2 - x1
+    dy = y2 - y1
+    denom = math.hypot(dx, dy)
+    if denom == 0:
+        return math.hypot(px - x1, py - y1)
+    return abs(dy * px - dx * py + x2 * y1 - y2 * x1) / denom
+
+
+def simplify_polyline_rdp(
+    points: List[Tuple[float, float]], max_deviation: float = 1.0
+) -> List[Tuple[float, float]]:
+    """Simplifies a sequence of (x, y) coordinates using Ramer-Douglas-Peucker algorithm."""
+    if len(points) < 3:
+        return points
+
+    x1, y1 = points[0]
+    x2, y2 = points[-1]
+    max_d = 0.0
+    index = 0
+
+    for i in range(1, len(points) - 1):
+        d = point_line_distance(points[i][0], points[i][1], x1, y1, x2, y2)
+        if d > max_d:
+            max_d = d
+            index = i
+
+    if max_d > max_deviation:
+        left = simplify_polyline_rdp(points[: index + 1], max_deviation)
+        right = simplify_polyline_rdp(points[index:], max_deviation)
+        return left[:-1] + right
+    else:
+        return [points[0], points[-1]]
+
+
+def regularize_svg_path_rdp(d_str: str, max_deviation: float = 1.0) -> str:
+    """Simplifies consecutive straight polyline runs in an SVG path using Ramer-Douglas-Peucker.
+
+    Collapses jagged raster staircases along shadows, straight edges, and window casings
+    into clean straight line segments, while keeping curves (C commands) completely intact.
+    """
+    if not d_str or not d_str.strip():
+        return d_str
+
+    tokens = re.findall(
+        r"([a-zA-Z])|([-+]?(?:\d*\.\d+|\d+)(?:[eE][-+]?\d+)?)", d_str
+    )
+    commands = []
+    curr_cmd = None
+    curr_args = []
+    for letter, num in tokens:
+        if letter:
+            if curr_cmd is not None:
+                commands.append((curr_cmd, curr_args))
+            curr_cmd = letter
+            curr_args = []
+        elif num:
+            curr_args.append(float(num))
+    if curr_cmd is not None:
+        commands.append((curr_cmd, curr_args))
+
+    out_parts = []
+    i = 0
+    curr_pt = (0.0, 0.0)
+
+    while i < len(commands):
+        cmd, args = commands[i]
+        if cmd == "M" and len(args) >= 2:
+            curr_pt = (args[0], args[1])
+            out_parts.append(f"M {_format_coord(curr_pt[0])} {_format_coord(curr_pt[1])}")
+            poly = [curr_pt]
+            j = i + 1
+            while (
+                j < len(commands)
+                and commands[j][0] == "L"
+                and len(commands[j][1]) >= 2
+            ):
+                poly.append((commands[j][1][0], commands[j][1][1]))
+                j += 1
+            if len(poly) > 2:
+                simplified = simplify_polyline_rdp(poly, max_deviation=max_deviation)
+                for p in simplified[1:]:
+                    out_parts.append(f"L {_format_coord(p[0])} {_format_coord(p[1])}")
+                curr_pt = simplified[-1]
+                i = j
+                continue
+            else:
+                i += 1
+        elif cmd == "L" and len(args) >= 2:
+            poly = [curr_pt]
+            j = i
+            while (
+                j < len(commands)
+                and commands[j][0] == "L"
+                and len(commands[j][1]) >= 2
+            ):
+                poly.append((commands[j][1][0], commands[j][1][1]))
+                j += 1
+            if len(poly) > 2:
+                simplified = simplify_polyline_rdp(poly, max_deviation=max_deviation)
+                for p in simplified[1:]:
+                    out_parts.append(f"L {_format_coord(p[0])} {_format_coord(p[1])}")
+                curr_pt = simplified[-1]
+                i = j
+                continue
+            else:
+                curr_pt = (args[0], args[1])
+                out_parts.append(f"L {_format_coord(curr_pt[0])} {_format_coord(curr_pt[1])}")
+                i += 1
+        elif cmd in ("C", "c") and len(args) >= 6:
+            curr_pt = (
+                (args[4], args[5])
+                if cmd == "C"
+                else (curr_pt[0] + args[4], curr_pt[1] + args[5])
+            )
+            formatted_args = " ".join(_format_coord(a) for a in args)
+            out_parts.append(f"{cmd} {formatted_args}")
+            i += 1
+        elif cmd in ("Z", "z"):
+            out_parts.append("Z")
+            i += 1
+        else:
+            formatted_args = " ".join(_format_coord(a) for a in args)
+            out_parts.append(f"{cmd} {formatted_args}".strip())
+            i += 1
+
+    return " ".join(out_parts)
+
+
+def refit_path_d(
+    d_str: str,
+    min_circularity: float = 0.92,
+    max_area: float = 1500.0,
+    min_area: float = 15.0,
+    min_aspect: float = 0.88,
+    regularize_lines: bool = True,
+    max_deviation: float = 1.0,
+) -> str:
+    """Refits circular subpaths and optionally regularizes straight staircases."""
+    if not d_str or not d_str.strip():
+        return d_str
+
+    subpath_tokens = re.split(r"(?=[mM])", d_str.strip())
+    subpaths = [s.strip() for s in subpath_tokens if s.strip()]
+    if not subpaths:
+        return d_str
+
+    any_change = False
+    new_subpaths = []
+    for sp in subpaths:
+        rings = parse_svg_path_to_rings(sp)
+        if len(rings) == 1:
+            is_circ, cx, cy, rx, ry, is_ccw = is_circular_ring(
+                rings[0],
+                min_circularity=min_circularity,
+                max_area=max_area,
+                min_area=min_area,
+                min_aspect=min_aspect,
+            )
+            if is_circ:
+                any_change = True
+                new_subpaths.append(
+                    generate_bezier_ellipse(cx, cy, rx, ry, is_ccw=is_ccw)
+                )
+                continue
+        if regularize_lines:
+            reg_sp = regularize_svg_path_rdp(sp, max_deviation=max_deviation)
+            if reg_sp != sp:
+                any_change = True
+                new_subpaths.append(reg_sp)
+                continue
+        new_subpaths.append(sp)
+
+    return " ".join(new_subpaths) if any_change else d_str
+
 
 
 @dataclass
@@ -169,12 +443,70 @@ class SvgOptimizer:
         )
         return pattern.sub(_replace_group, svg_str)
 
+    def refit_circular_primitives(
+        self,
+        layer_data: StructuredLayerData,
+        min_circularity: float = 0.82,
+        max_area: float = 1500.0,
+        min_area: float = 15.0,
+        min_aspect: float = 0.75,
+    ) -> StructuredLayerData:
+        """Refits circular micro-primitives across all paths in layer_data.
+
+        Transforms faceted polygons (such as 8-sided octagonal buttons, dots, or
+        spots) into mathematically smooth 4-arc cubic Bezier circles/ellipses,
+        while leaving all non-circular contours (such as sharp 90-degree pocket
+        corners) 100% untouched.
+        """
+        if not layer_data or not layer_data.layers:
+            return layer_data
+
+        new_layers = []
+        for layer in layer_data.layers:
+            new_paths = []
+            for path in layer.paths:
+                new_d = refit_path_d(
+                    path.path_data,
+                    min_circularity=min_circularity,
+                    max_area=max_area,
+                    min_area=min_area,
+                    min_aspect=min_aspect,
+                )
+                if new_d != path.path_data:
+                    new_paths.append(
+                        PathRecord(
+                            id=path.id,
+                            color_hex=path.color_hex,
+                            path_data=new_d,
+                            area=path.area,
+                            fill_rule=path.fill_rule,
+                        )
+                    )
+                else:
+                    new_paths.append(path)
+            new_layers.append(
+                LayerGroup(
+                    layer_id=layer.layer_id,
+                    label=layer.label,
+                    color_hex=layer.color_hex,
+                    paths=new_paths,
+                    z_index=layer.z_index,
+                )
+            )
+
+        return StructuredLayerData(
+            mode=layer_data.mode,
+            layers=new_layers,
+            dimensions=layer_data.dimensions,
+        )
+
     def build_and_optimize(
         self,
         layer_data: StructuredLayerData,
         dimensions: Optional[Tuple[int, int]] = None,
         precision: int = 7,
         enable_scour: bool = True,
+        refit_circles: bool = True,
     ) -> OptimizedSvgResult:
         """Builds an Inkscape layer DOM SVG and applies Scour optimization passes.
 
@@ -183,10 +515,14 @@ class SvgOptimizer:
             dimensions: Optional (width, height) document canvas dimensions.
             precision: Decimal precision for numerical coordinates.
             enable_scour: Whether to run Scour optimization.
+            refit_circles: Whether to refit circular micro-primitives into smooth Bezier arcs.
 
         Returns:
             OptimizedSvgResult containing SVG markup, layer count, node count, and byte size.
         """
+        if refit_circles:
+            layer_data = self.refit_circular_primitives(layer_data)
+
         raw_svg = self.build_svg(layer_data, dimensions=dimensions)
         optimized_svg = self.optimize(raw_svg, precision=precision, enable_scour=enable_scour)
 
@@ -200,3 +536,4 @@ class SvgOptimizer:
             total_nodes=total_nodes,
             file_size=file_size,
         )
+
