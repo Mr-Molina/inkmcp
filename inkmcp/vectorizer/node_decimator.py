@@ -508,9 +508,58 @@ def decimate_path_nodes(d_str: str, tolerance: float = 0.5) -> Tuple[str, NodeMe
                 continue
 
         elif cmd == "C" and len(args) >= 6:
+            # Collect chain of consecutive C commands
+            chain = [(curr_pt, (args[0], args[1]), (args[2], args[3]), (args[4], args[5]))]
             curr_pt = (args[4], args[5])
-            out_commands.append((cmd, args))
-            i += 1
+            j = i + 1
+            while j < len(commands) and commands[j][0] == "C" and len(commands[j][1]) >= 6:
+                c_args = commands[j][1]
+                p0 = curr_pt
+                p1 = (c_args[0], c_args[1])
+                p2 = (c_args[2], c_args[3])
+                p3 = (c_args[4], c_args[5])
+                chain.append((p0, p1, p2, p3))
+                curr_pt = p3
+                j += 1
+
+            if len(chain) >= 2:
+                # Sample intermediate points along the Bezier chain
+                sampled_pts = [chain[0][0]]
+                for seg in chain:
+                    p0, p1, p2, p3 = seg
+                    sampled_pts.append(_bezier_eval(p0, p1, p2, p3, 0.33))
+                    sampled_pts.append(_bezier_eval(p0, p1, p2, p3, 0.67))
+                    sampled_pts.append(p3)
+
+                # Check if nearly collinear (can collapse to single L)
+                start_p = sampled_pts[0]
+                end_p = sampled_pts[-1]
+                chord_len = _dist(start_p, end_p)
+                max_dev = 0.0
+                if chord_len > 0.5:
+                    for pt in sampled_pts:
+                        # Distance to line start_p -> end_p
+                        num = abs((end_p[1] - start_p[1]) * pt[0] - (end_p[0] - start_p[0]) * pt[1] + end_p[0] * start_p[1] - end_p[1] * start_p[0])
+                        d = num / chord_len
+                        if d > max_dev:
+                            max_dev = d
+
+                if max_dev <= min(tolerance, 0.35) and chord_len > 1.0:
+                    out_commands.append(("L", [end_p[0], end_p[1]]))
+                else:
+                    fitted = fit_cubic_beziers_schneider(sampled_pts, max_error=tolerance)
+                    if 0 < len(fitted) < len(chain):
+                        for crv in fitted:
+                            out_commands.append(("C", [crv[1][0], crv[1][1], crv[2][0], crv[2][1], crv[3][0], crv[3][1]]))
+                    else:
+                        for seg in chain:
+                            out_commands.append(("C", [seg[1][0], seg[1][1], seg[2][0], seg[2][1], seg[3][0], seg[3][1]]))
+                i = j
+                continue
+            else:
+                out_commands.append((cmd, args))
+                i += 1
+                continue
         elif cmd in ("Z", "z"):
             out_commands.append((cmd, []))
             i += 1

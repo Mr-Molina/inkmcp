@@ -88,3 +88,54 @@ def quantize_to_palette_subpixel(
         out_rgb[y_start:y_end] = pal_arr[best_idx].astype(np.uint8)
 
     return out_rgb
+
+
+class SuperResolutionProcessor:
+    """High-resolution edge-preserving image upscaler and palette quantizer."""
+
+    def __init__(
+        self,
+        scale_factor: int = 4,
+        denoise: bool = True,
+        block_quantize: bool = True,
+    ):
+        self.scale_factor = scale_factor
+        self.denoise = denoise
+        self.block_quantize = block_quantize
+
+    def process(
+        self,
+        image_input,
+        num_colors: int = 8,
+    ) -> Image.Image:
+        """Processes input image with Lanczos4 expansion, bilateral filtering, and palette quantization."""
+        from pathlib import Path
+        if isinstance(image_input, (str, Path)):
+            pil_img = Image.open(str(image_input)).convert("RGB")
+            arr = np.array(pil_img)
+        elif isinstance(image_input, Image.Image):
+            pil_img = image_input.convert("RGB")
+            arr = np.array(pil_img)
+        elif isinstance(image_input, np.ndarray):
+            arr = image_input
+        else:
+            raise TypeError(f"Unsupported image type: {type(image_input)}")
+
+        # 1. Upscale with edge-preserving bilateral filtering
+        upscaled = upscale_edge_preserving(arr, scale=self.scale_factor)
+
+        # 2. Extract discrete palette and block-quantize if requested
+        if self.block_quantize and num_colors > 0:
+            from inkmcp.vectorizer.preprocessor import ImagePreprocessor
+            from inkmcp.vectorizer.palette import hex_to_rgb
+            prep = ImagePreprocessor()
+            prep_res = prep.process(
+                Image.fromarray(arr), num_colors=num_colors, denoise=self.denoise
+            )
+            palette_rgb = [hex_to_rgb(hex_code) for hex_code in prep_res.palette]
+            if palette_rgb:
+                quantized = quantize_to_palette_subpixel(upscaled, palette_rgb)
+                return Image.fromarray(quantized)
+
+        return Image.fromarray(upscaled)
+
