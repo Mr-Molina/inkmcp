@@ -31,7 +31,7 @@ logger = logging.getLogger(__name__)
 class PipelineConfig:
     """Configuration options for the advanced CAM vectorization pipeline."""
 
-    super_res_scale: int = 4
+    super_res_scale: int = 1
     num_colors: int = 8
     filter_speckle: float = 4.0
     color_tolerance: float = 5.0

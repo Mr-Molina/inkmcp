@@ -70,34 +70,8 @@ def order_inside_out_cuts(paths: List[PathRecord]) -> List[PathRecord]:
     if not paths:
         return []
 
-    # 1. Process internal subpaths for each path record
-    processed_paths = []
-    for p in paths:
-        subpaths = [s.strip() for s in re.split(r"(?=[mM])", p.path_data.strip()) if s.strip()]
-        if len(subpaths) > 1:
-            # Sort subpaths by ring area ascending (holes cut first, exterior last)
-            def subpath_area(sp):
-                r = parse_svg_path_to_rings(sp)
-                if r and len(r[0]) >= 3:
-                    try:
-                        return Polygon(r[0]).area
-                    except Exception:
-                        return 0.0
-                return 0.0
-
-            subpaths.sort(key=subpath_area)
-            reordered_d = " ".join(subpaths)
-            processed_paths.append(
-                PathRecord(
-                    id=p.id,
-                    color_hex=p.color_hex,
-                    path_data=reordered_d,
-                    area=p.area,
-                    fill_rule=p.fill_rule,
-                )
-            )
-        else:
-            processed_paths.append(p)
+    # 1. Keep internal subpaths in original winding sequence
+    processed_paths = list(paths)
 
     # 2. Build containment DAG across path records
     poly_list = []

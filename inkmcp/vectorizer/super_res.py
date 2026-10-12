@@ -64,17 +64,25 @@ def quantize_to_palette_subpixel(
 ) -> np.ndarray:
     """Quantizes an upscaled image to a discrete color palette in memory-efficient blocks.
 
+    Preserves alpha channel transparency if present.
+
     Args:
-        image: Upscaled RGB uint8 array.
+        image: Upscaled RGB or RGBA uint8 array.
         palette_rgb: List of (R, G, B) integer tuples.
         block_size: Vertical block height to constrain peak memory during nearest-color search.
 
     Returns:
-        Quantized uint8 array matching palette colors.
+        Quantized uint8 array matching palette colors with alpha preserved.
     """
     pal_arr = np.array(palette_rgb, dtype=np.float32)
     h, w = image.shape[:2]
-    out_rgb = np.zeros((h, w, 3), dtype=np.uint8)
+    has_alpha = image.shape[2] == 4 if len(image.shape) > 2 else False
+
+    if has_alpha:
+        out = np.zeros((h, w, 4), dtype=np.uint8)
+        out[:, :, 3] = image[:, :, 3]
+    else:
+        out = np.zeros((h, w, 3), dtype=np.uint8)
 
     num_blocks = (h + block_size - 1) // block_size
     for b in range(num_blocks):
@@ -85,9 +93,9 @@ def quantize_to_palette_subpixel(
             (block[:, :, :, None] - pal_arr.T[None, None, :, :]) ** 2, axis=2
         )
         best_idx = np.argmin(dists, axis=-1)
-        out_rgb[y_start:y_end] = pal_arr[best_idx].astype(np.uint8)
+        out[y_start:y_end, :, :3] = pal_arr[best_idx].astype(np.uint8)
 
-    return out_rgb
+    return out
 
 
 class SuperResolutionProcessor:
@@ -111,10 +119,17 @@ class SuperResolutionProcessor:
         """Processes input image with Lanczos4 expansion, bilateral filtering, and palette quantization."""
         from pathlib import Path
         if isinstance(image_input, (str, Path)):
-            pil_img = Image.open(str(image_input)).convert("RGB")
+            pil_img = Image.open(str(image_input))
+            if pil_img.mode in ("RGBA", "LA") or "transparency" in pil_img.info:
+                pil_img = pil_img.convert("RGBA")
+            else:
+                pil_img = pil_img.convert("RGB")
             arr = np.array(pil_img)
         elif isinstance(image_input, Image.Image):
-            pil_img = image_input.convert("RGB")
+            if image_input.mode in ("RGBA", "LA") or "transparency" in image_input.info:
+                pil_img = image_input.convert("RGBA")
+            else:
+                pil_img = image_input.convert("RGB")
             arr = np.array(pil_img)
         elif isinstance(image_input, np.ndarray):
             arr = image_input
