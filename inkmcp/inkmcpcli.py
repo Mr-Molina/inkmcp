@@ -644,7 +644,7 @@ def parse_vectorize_params(raw_params: Any) -> Dict[str, Any]:
     """
     Parse vectorize-image CLI parameters from list of tokens, string, or JSON.
     Preserves paths with spaces without stripping or improper truncation.
-    Supported modes: 'cut_ready', 'layered', 'silhouette'.
+    Supported modes: 'cut_ready', 'layered', 'silhouette', 'coloring_book'.
     Supported tuning: 'corner_threshold', 'segment_length', 'filter_speckle', 'smoothness'.
     """
     if raw_params is None:
@@ -749,9 +749,13 @@ class InkscapeClient:
         Returns:
             Element data dictionary
         """
-        # Handle vectorize-image command
-        if tag.lower().replace("_", "-") == "vectorize-image":
-            return {"tag": tag, "attributes": parse_vectorize_params(param_str)}
+        # Handle vectorize-image and vectorize-coloring-book commands
+        tag_norm = tag.lower().replace("_", "-")
+        if tag_norm in ("vectorize-image", "vectorize-coloring-book"):
+            attrs = parse_vectorize_params(param_str)
+            if tag_norm == "vectorize-coloring-book" and "mode" not in attrs:
+                attrs["mode"] = "coloring_book"
+            return {"tag": tag, "attributes": attrs}
 
         # Use the unified parsing approach
         full_content = f"{tag} {param_str}".strip()
@@ -797,7 +801,7 @@ class InkscapeClient:
         # Check if we have a proper response from response file
         if "response" in result:
             response_data = result["response"]
-            if tag.lower().replace("_", "-") == "vectorize-image":
+            if tag.lower().replace("_", "-") in ("vectorize-image", "vectorize-coloring-book"):
                 data = response_data.get("data", {})
                 status_icon = "✅" if response_data.get("status") == "success" else "⚠️"
                 msg = response_data.get("message", "Vectorization completed")
@@ -912,6 +916,9 @@ Examples:
   # Vectorize image into cut decal or layered SVG (modes: cut_ready, layered, silhouette)
   python inkmcpcli.py vectorize-image "image_path=art.png mode=silhouette output_path=art.svg corner_threshold=25 segment_length=2.0"
 
+  # Vectorize coloring book line art with interactive bucket fills
+  python inkmcpcli.py vectorize-coloring-book "image_path=art.png output_path=art.svg"
+
   # Get selection info
   python inkmcpcli.py get-selection ""
 
@@ -932,8 +939,9 @@ Examples:
     client = InkscapeClient()
 
     try:
-        # Handle vectorize-image command
-        if args.tag.lower().replace("_", "-") == "vectorize-image":
+        # Handle vectorize-image and vectorize-coloring-book commands
+        tag_norm = args.tag.lower().replace("_", "-")
+        if tag_norm in ("vectorize-image", "vectorize-coloring-book"):
             if args.file:
                 abs_file_path = os.path.abspath(args.file)
                 if args.strict_boundary:
@@ -956,12 +964,15 @@ Examples:
             else:
                 params_dict = parse_vectorize_params(args.params)
 
+            if tag_norm == "vectorize-coloring-book" and "mode" not in params_dict:
+                params_dict["mode"] = "coloring_book"
+
             # Validate mode parameter if explicitly specified
-            valid_modes = ("cut_ready", "layered", "silhouette")
+            valid_modes = ("cut_ready", "layered", "silhouette", "coloring_book")
             mode = params_dict.get("mode")
             if mode is not None and str(mode).strip() not in valid_modes:
                 params_str = " ".join(args.params) if isinstance(args.params, list) else str(args.params)
-                err_msg = f"Unsupported mode: '{mode}'. Must be 'cut_ready', 'layered', or 'silhouette'"
+                err_msg = f"Unsupported mode: '{mode}'. Must be 'cut_ready', 'layered', 'silhouette', or 'coloring_book'"
                 if args.parse_out or args.pretty:
                     output = {
                         "command": f"{args.tag} {params_str}".strip(),
@@ -1233,11 +1244,15 @@ def parse_command_string(command: str) -> Dict[str, Any]:
     """
     stripped = command.strip()
     parts = stripped.split(None, 1)
-    if parts and parts[0].lower().replace("_", "-") == "vectorize-image":
+    if parts and parts[0].lower().replace("_", "-") in ("vectorize-image", "vectorize-coloring-book"):
+        tag_norm = parts[0].lower().replace("_", "-")
         param_part = parts[1] if len(parts) > 1 else ""
+        attrs = parse_vectorize_params(param_part)
+        if tag_norm == "vectorize-coloring-book" and "mode" not in attrs:
+            attrs["mode"] = "coloring_book"
         return {
             "tag": parts[0],
-            "attributes": parse_vectorize_params(param_part),
+            "attributes": attrs,
         }
     result = parse_tag_and_attributes(stripped)
     return result if result is not None else {"tag": "", "attributes": {}}

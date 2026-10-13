@@ -471,7 +471,7 @@ async def vectorize_image(
     ctx: Context,
     image_path: str,
     mode: str = "cut_ready",
-    num_colors: int = 8,
+    num_colors: int = 0,
     filter_speckle: float = 4.0,
     smoothness: float = 1.0,
     color_tolerance: float = 5.0,
@@ -481,6 +481,8 @@ async def vectorize_image(
     remove_background: bool = False,
     corner_threshold: Optional[int] = None,
     segment_length: Optional[float] = None,
+    engine: Optional[str] = None,
+    flatten: str = "auto",
 ) -> str:
     """Vectorize a raster image into a structured SVG document.
 
@@ -496,7 +498,16 @@ async def vectorize_image(
                      Optimized for screen printing, illustration, and digital art.
         * 'silhouette': Crisp single-layer decal; unified contour with compound hole preservation.
                         Optimized for single-color cut vinyl decals, stamps, and laser engraving.
-    - num_colors: Color quantization count (clamped to 2..32, default: 8).
+        * 'coloring_book': Line art vectorization with interactive flood filling.
+                           Optimized for coloring pages, line drawings, and paint bucket fills.
+    - num_colors: Color count (2..32). 0 (default) = auto-detect the artwork's palette
+                  (planar engine); the vtracer engine falls back to 8.
+    - engine: 'planar' (default for cut_ready) builds a shared-boundary planar mosaic: each
+              border between two colors is fitted once and shared, so there are no gaps,
+              slivers, or wobbly outlines. 'vtracer' = legacy per-region tracer.
+    - flatten: Planar engine only. 'auto' (default) detects painted/gradient artwork and
+               flattens shading into flat color regions before tracing (flat art is left
+               untouched). 'true' forces flattening, 'false' disables it.
     - filter_speckle: Minimum speckle cutoff area in square pixels (default: 4.0).
     - smoothness: Curve smoothing multiplier (default: 1.0; higher = smoother curves).
     - color_tolerance: CIELAB Delta E threshold to merge near-identical colors (default: 5.0; 0 to disable).
@@ -513,9 +524,9 @@ async def vectorize_image(
         Markdown-formatted summary including status emoji, file path, layer breakdown,
         node count, and injection status.
     """
-    valid_modes = ("cut_ready", "layered", "silhouette")
+    valid_modes = ("cut_ready", "layered", "silhouette", "coloring_book")
     if mode not in valid_modes:
-        return f"❌ **Vectorization Failed**: Unsupported mode: '{mode}'. Must be 'cut_ready', 'layered', or 'silhouette'"
+        return f"❌ **Vectorization Failed**: Unsupported mode: '{mode}'. Must be 'cut_ready', 'layered', 'silhouette', or 'coloring_book'"
 
     try:
         loop = asyncio.get_running_loop()
@@ -545,6 +556,10 @@ async def vectorize_image(
         "denoise": denoise,
         "remove_background": remove_background,
     }
+    if engine:
+        params["engine"] = engine
+    if flatten is not None:
+        params["flatten"] = flatten
     if corner_threshold is not None:
         params["corner_threshold"] = corner_threshold
     if segment_length is not None:
