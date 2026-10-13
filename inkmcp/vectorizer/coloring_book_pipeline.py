@@ -1,5 +1,6 @@
 import os
 from pathlib import Path
+import re
 import tempfile
 from typing import Any, Dict, Optional
 import cv2
@@ -11,6 +12,7 @@ from inkmcp.inkmcpops.common import create_error_response, create_success_respon
 from inkmcp.vectorizer.color_inventory import ColorInventory
 from inkmcp.vectorizer.core import VTracerCore
 from inkmcp.vectorizer.outline_generator import OutlineGenerator
+from inkmcp.vectorizer.planar_tracer import PlanarTraceConfig, trace_planar
 from inkmcp.vectorizer.region_topology import RegionTopologyAnalyzer
 
 class ColoringBookPipeline:
@@ -43,15 +45,40 @@ class ColoringBookPipeline:
         # 2. Outline Ingestion
         bin_outline = self._outline_gen.generate_outline(image_path, outline_path=outline_path)
 
-        # 3. Vectorize Line Art (Wrap ndarray in PIL.Image to prevent VTracer TypeError)
-        pil_outline = Image.fromarray(bin_outline)
-        core = VTracerCore()
-        raw_vector = core.vectorize(
-            pil_outline,
-            colormode="binary",
-            hierarchical="stacked",
-            filter_speckle=4,
-        )
+        engine = str(params.get("engine", "planar")).strip().lower()
+
+        # 3. Vectorize Line Art (defaults to planar tracer for subpixel line weight preservation)
+        line_path_records = []
+        if engine == "planar":
+            cfg = PlanarTraceConfig(
+                num_colors=2,
+                palette=[(0, 0, 0), (255, 255, 255)],
+                min_area=4,
+                supersample=4,
+                subpixel_edges=True,
+            )
+            planar_input = outline_path if (outline_path and Path(outline_path).is_file()) else bin_outline
+            planar_res = trace_planar(planar_input, cfg)
+            black_paths = re.findall(r'<path[^>]*fill="#000000"[^>]*d="([^"]*)"', planar_res.svg)
+            if not black_paths:
+                black_paths = re.findall(r'<path[^>]*d="([^"]*)"[^>]*fill="#000000"', planar_res.svg)
+
+            for idx, d_data in enumerate(black_paths):
+                path_id = f"path_line_art_{idx+1:03d}" if len(black_paths) > 1 else "path_line_art"
+                line_path_records.append({"id": path_id, "d": d_data})
+        else:
+            pil_outline = Image.fromarray(bin_outline)
+            core = VTracerCore()
+            raw_vector = core.vectorize(
+                pil_outline,
+                colormode="binary",
+                hierarchical="stacked",
+                filter_speckle=4,
+            )
+            line_path_records = [
+                {"id": p.id, "d": p.path_data}
+                for p in raw_vector.path_records
+            ]
 
         # 4. Extract Regions & Generate Vector Fills
         h, w = bin_outline.shape[:2]
@@ -96,8 +123,8 @@ class ColoringBookPipeline:
                         })
 
         line_paths_xml = [
-            f'    <path id="{p.id}" fill="#000000" stroke="none" d="{p.path_data}" />'
-            for p in raw_vector.path_records
+            f'    <path id="{p["id"]}" fill="#000000" fill-rule="nonzero" stroke="none" d="{p["d"]}" />'
+            for p in line_path_records
         ]
 
         # 5. Generate Full SVG Document (Fills Layer + Line Art Layer)
@@ -167,13 +194,14 @@ class ColoringBookPipeline:
                     {
                         "tag": "path",
                         "attributes": {
-                            "id": p.id,
+                            "id": p["id"],
                             "fill": "#000000",
+                            "fill-rule": "nonzero",
                             "stroke": "none",
-                            "d": p.path_data,
+                            "d": p["d"],
                         },
                     }
-                    for p in raw_vector.path_records
+                    for p in line_path_records
                 ],
             }
             backend.execute_operation(lines_payload)
@@ -198,7 +226,7 @@ class ColoringBookPipeline:
                 commands, click_delay_ms=click_delay_ms, backend=backend
             )
 
-        total_nodes = sum(len(p.path_data.split()) for p in raw_vector.path_records) + sum(len(p["d"].split()) for p in fill_paths_records)
+        total_nodes = sum(len(p["d"].split()) for p in line_path_records) + sum(len(p["d"].split()) for p in fill_paths_records)
 
         return create_success_response(
             "Coloring book vectorization and fill sequence complete",

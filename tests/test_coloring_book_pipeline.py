@@ -15,9 +15,10 @@ def mock_outline_and_source(tmp_path):
 
     return str(src_path), str(out_path)
 
-def test_coloring_book_pipeline_end_to_end(mock_outline_and_source, tmp_path):
+@pytest.mark.parametrize("engine", ["planar", "vtracer"])
+def test_coloring_book_pipeline_end_to_end(mock_outline_and_source, tmp_path, engine):
     src_path, out_path = mock_outline_and_source
-    out_svg = tmp_path / "output.svg"
+    out_svg = tmp_path / f"output_{engine}.svg"
     pipeline = ColoringBookPipeline()
 
     mock_backend = MagicMock()
@@ -28,9 +29,11 @@ def test_coloring_book_pipeline_end_to_end(mock_outline_and_source, tmp_path):
             "image_path": src_path,
             "outline_path": out_path,
             "output_path": str(out_svg),
+            "engine": engine,
             "inject_to_inkscape": True,
         }, backend=mock_backend)
 
         assert result["status"] == "success"
         assert result["data"]["regions_detected"] >= 1
+        assert result["data"]["layer_count"] == 2
         assert out_svg.exists()

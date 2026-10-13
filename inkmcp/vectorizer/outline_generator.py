@@ -26,7 +26,10 @@ class OutlineGenerator:
             if Path(outline_path).is_file():
                 img = cv2.imread(str(outline_path), cv2.IMREAD_GRAYSCALE)
                 if img is not None:
-                    _, binarized = cv2.threshold(img, 127, 255, cv2.THRESH_BINARY)
+                    if img.std() > 5.0:
+                        _, binarized = cv2.threshold(img, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+                    else:
+                        _, binarized = cv2.threshold(img, 127, 255, cv2.THRESH_BINARY)
                     return binarized
                 logger.warning("Could not decode outline image at %s; falling back to edge detection", outline_path)
             else:
