@@ -1,8 +1,10 @@
-"""Outline generator protocol and local edge-detection fallback."""
+import logging
 from pathlib import Path
 from typing import Optional
 import cv2
 import numpy as np
+
+logger = logging.getLogger(__name__)
 
 class OutlineGenerator:
     """Manages coloring-book line art generation protocol and high-quality edge fallback."""
@@ -20,11 +22,15 @@ class OutlineGenerator:
         outline_path: Optional[str] = None,
     ) -> np.ndarray:
         """Load pre-generated AI outline or execute local edge-detection fallback."""
-        if outline_path and Path(outline_path).is_file():
-            img = cv2.imread(str(outline_path), cv2.IMREAD_GRAYSCALE)
-            if img is not None:
-                _, binarized = cv2.threshold(img, 127, 255, cv2.THRESH_BINARY)
-                return binarized
+        if outline_path:
+            if Path(outline_path).is_file():
+                img = cv2.imread(str(outline_path), cv2.IMREAD_GRAYSCALE)
+                if img is not None:
+                    _, binarized = cv2.threshold(img, 127, 255, cv2.THRESH_BINARY)
+                    return binarized
+                logger.warning("Could not decode outline image at %s; falling back to edge detection", outline_path)
+            else:
+                logger.warning("Specified outline_path does not exist: %s; falling back to edge detection", outline_path)
 
         src = cv2.imread(str(image_path), cv2.IMREAD_COLOR)
         if src is None:

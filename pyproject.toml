@@ -28,4 +28,5 @@ packages = [
     "inkmcp",
     "inkmcp.backends",
     "inkmcp.inkmcpops",
+    "inkmcp.vectorizer",
 ]

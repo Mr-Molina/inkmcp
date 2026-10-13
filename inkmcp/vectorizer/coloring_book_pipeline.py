@@ -72,6 +72,11 @@ class ColoringBookPipeline:
             temp_fd, temp_path = tempfile.mkstemp(suffix=".svg", prefix="coloring_book_")
             os.close(temp_fd)
             resolved_output = temp_path
+        else:
+            resolved_output = os.path.abspath(resolved_output)
+            parent_dir = os.path.dirname(resolved_output)
+            if parent_dir:
+                os.makedirs(parent_dir, exist_ok=True)
 
         with open(resolved_output, "w", encoding="utf-8") as f:
             f.write(svg_content)
