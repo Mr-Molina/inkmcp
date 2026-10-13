@@ -4,7 +4,10 @@ import io
 import os
 import re
 import tempfile
-import xml.etree.ElementTree as ET
+try:
+    import defusedxml.ElementTree as ET  # type: ignore[import-untyped]
+except ImportError:
+    import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
@@ -129,6 +132,69 @@ def parse_svg_transform_translate(transform_str: Optional[str]) -> Tuple[float, 
     return (0.0, 0.0)
 
 
+def _tokenize_svg_path(d: str) -> List[str]:
+    """Tokenizes SVG path data, splitting concatenated elliptical arc boolean flags.
+
+    In SVG arc commands (A/a), large-arc-flag and sweep-flag are 0 or 1 and can be
+    concatenated without whitespace with each other or subsequent coordinates
+    (e.g., 'a10,10 0 015,5' -> '0', '1', '5').
+    """
+    raw_tokens = re.findall(
+        r"[MmLlHhVvCcSsQqTtAaZz]|[-+]?(?:\d*\.\d+|\d+)(?:[eE][-+]?\d+)?", d
+    )
+    tokens: List[str] = []
+    current_cmd = ""
+    arc_arg_idx = 0
+
+    for token in raw_tokens:
+        if token.isalpha():
+            current_cmd = token
+            arc_arg_idx = 0
+            tokens.append(token)
+            continue
+
+        if current_cmd in ("A", "a"):
+            pos = arc_arg_idx % 7
+            if pos == 3:
+                # Expecting large-arc-flag (must be 0 or 1)
+                if len(token) > 1 and token[0] in ("0", "1"):
+                    tokens.append(token[0])
+                    arc_arg_idx += 1
+                    rest = token[1:]
+                    if rest[0] in ("0", "1"):
+                        tokens.append(rest[0])
+                        arc_arg_idx += 1
+                        remainder = rest[1:]
+                        if remainder:
+                            tokens.append(remainder)
+                            arc_arg_idx += 1
+                    else:
+                        tokens.append(rest)
+                        arc_arg_idx += 1
+                else:
+                    tokens.append(token)
+                    arc_arg_idx += 1
+            elif pos == 4:
+                # Expecting sweep-flag (must be 0 or 1)
+                if len(token) > 1 and token[0] in ("0", "1"):
+                    tokens.append(token[0])
+                    arc_arg_idx += 1
+                    remainder = token[1:]
+                    if remainder:
+                        tokens.append(remainder)
+                        arc_arg_idx += 1
+                else:
+                    tokens.append(token)
+                    arc_arg_idx += 1
+            else:
+                tokens.append(token)
+                arc_arg_idx += 1
+        else:
+            tokens.append(token)
+
+    return tokens
+
+
 def apply_translate_to_svg_path(d: str, tx: float, ty: float) -> str:
     """Parses SVG path coordinates and shifts absolute coordinates by (+tx, +ty).
 
@@ -140,9 +206,7 @@ def apply_translate_to_svg_path(d: str, tx: float, ty: float) -> str:
     if tx == 0.0 and ty == 0.0:
         return d
 
-    tokens = re.findall(
-        r"[MmLlHhVvCcSsQqTtAaZz]|[-+]?(?:\d*\.\d+|\d+)(?:[eE][-+]?\d+)?", d
-    )
+    tokens = _tokenize_svg_path(d)
     if not tokens:
         return d
 
@@ -241,14 +305,15 @@ def apply_translate_to_svg_path(d: str, tx: float, ty: float) -> str:
     return " ".join(result)
 
 
+translate_svg_path_coordinates = apply_translate_to_svg_path
+
+
 def scale_svg_path_coordinates(d: str, scale_factor: float) -> str:
     """Scales numeric coordinates in SVG path data by scale_factor."""
     if not d or not d.strip() or scale_factor == 1.0:
         return d
 
-    tokens = re.findall(
-        r"[MmLlHhVvCcSsQqTtAaZz]|[-+]?(?:\d*\.\d+|\d+)(?:[eE][-+]?\d+)?", d
-    )
+    tokens = _tokenize_svg_path(d)
     if not tokens:
         return d
 
@@ -299,9 +364,7 @@ def parse_svg_path_to_rings(
     d: str, samples_per_curve: int = 8
 ) -> List[List[Tuple[float, float]]]:
     """Parses SVG path data into a list of polygonal coordinate rings."""
-    tokens = re.findall(
-        r"[MmLlHhVvCcSsQqTtAaZz]|[-+]?(?:\d*\.\d+|\d+)(?:[eE][-+]?\d+)?", d
-    )
+    tokens = _tokenize_svg_path(d)
 
     rings: List[List[Tuple[float, float]]] = []
     current_ring: List[Tuple[float, float]] = []
@@ -322,149 +385,185 @@ def parse_svg_path_to_rings(
                 current_ring = []
 
         if current_cmd in ("M", "m"):
-            x = float(tokens[idx])
-            y = float(tokens[idx + 1])
-            idx += 2
-            if current_cmd == "m":
-                x += current_x
-                y += current_y
-            current_x, current_y = x, y
-            start_x, start_y = x, y
-            current_ring.append((current_x, current_y))
-            current_cmd = "L" if current_cmd == "M" else "l"
+            if idx + 1 < len(tokens):
+                x = float(tokens[idx])
+                y = float(tokens[idx + 1])
+                idx += 2
+                if current_cmd == "m":
+                    x += current_x
+                    y += current_y
+                current_x, current_y = x, y
+                start_x, start_y = x, y
+                current_ring.append((current_x, current_y))
+                current_cmd = "L" if current_cmd == "M" else "l"
+            else:
+                idx += 1
         elif current_cmd in ("L", "l"):
-            x = float(tokens[idx])
-            y = float(tokens[idx + 1])
-            idx += 2
-            if current_cmd == "l":
-                x += current_x
-                y += current_y
-            current_x, current_y = x, y
-            current_ring.append((current_x, current_y))
+            if idx + 1 < len(tokens):
+                x = float(tokens[idx])
+                y = float(tokens[idx + 1])
+                idx += 2
+                if current_cmd == "l":
+                    x += current_x
+                    y += current_y
+                current_x, current_y = x, y
+                current_ring.append((current_x, current_y))
+            else:
+                idx += 1
         elif current_cmd in ("H", "h"):
-            x = float(tokens[idx])
-            idx += 1
-            if current_cmd == "h":
-                x += current_x
-            current_x = x
-            current_ring.append((current_x, current_y))
+            if idx < len(tokens):
+                x = float(tokens[idx])
+                idx += 1
+                if current_cmd == "h":
+                    x += current_x
+                current_x = x
+                current_ring.append((current_x, current_y))
+            else:
+                idx += 1
         elif current_cmd in ("V", "v"):
-            y = float(tokens[idx])
-            idx += 1
-            if current_cmd == "v":
-                y += current_y
-            current_y = y
-            current_ring.append((current_x, current_y))
+            if idx < len(tokens):
+                y = float(tokens[idx])
+                idx += 1
+                if current_cmd == "v":
+                    y += current_y
+                current_y = y
+                current_ring.append((current_x, current_y))
+            else:
+                idx += 1
         elif current_cmd in ("C", "c"):
-            x1 = float(tokens[idx])
-            y1 = float(tokens[idx + 1])
-            x2 = float(tokens[idx + 2])
-            y2 = float(tokens[idx + 3])
-            x3 = float(tokens[idx + 4])
-            y3 = float(tokens[idx + 5])
-            idx += 6
-            if current_cmd == "c":
-                x1 += current_x
-                y1 += current_y
-                x2 += current_x
-                y2 += current_y
-                x3 += current_x
-                y3 += current_y
-            p0 = (current_x, current_y)
-            p1 = (x1, y1)
-            p2 = (x2, y2)
-            p3 = (x3, y3)
-            last_c_ctrl = (x2, y2)
-            for step in range(1, samples_per_curve + 1):
-                t = step / samples_per_curve
-                t_inv = 1.0 - t
-                bx = (
-                    t_inv**3 * p0[0]
-                    + 3 * (t_inv**2) * t * p1[0]
-                    + 3 * t_inv * (t**2) * p2[0]
-                    + t**3 * p3[0]
-                )
-                by = (
-                    t_inv**3 * p0[1]
-                    + 3 * (t_inv**2) * t * p1[1]
-                    + 3 * t_inv * (t**2) * p2[1]
-                    + t**3 * p3[1]
-                )
-                current_ring.append((bx, by))
-            current_x, current_y = x3, y3
+            if idx + 5 < len(tokens):
+                x1 = float(tokens[idx])
+                y1 = float(tokens[idx + 1])
+                x2 = float(tokens[idx + 2])
+                y2 = float(tokens[idx + 3])
+                x3 = float(tokens[idx + 4])
+                y3 = float(tokens[idx + 5])
+                idx += 6
+                if current_cmd == "c":
+                    x1 += current_x
+                    y1 += current_y
+                    x2 += current_x
+                    y2 += current_y
+                    x3 += current_x
+                    y3 += current_y
+                p0 = (current_x, current_y)
+                p1 = (x1, y1)
+                p2 = (x2, y2)
+                p3 = (x3, y3)
+                last_c_ctrl = (x2, y2)
+                for step in range(1, samples_per_curve + 1):
+                    t = step / samples_per_curve
+                    t_inv = 1.0 - t
+                    bx = (
+                        t_inv**3 * p0[0]
+                        + 3 * (t_inv**2) * t * p1[0]
+                        + 3 * t_inv * (t**2) * p2[0]
+                        + t**3 * p3[0]
+                    )
+                    by = (
+                        t_inv**3 * p0[1]
+                        + 3 * (t_inv**2) * t * p1[1]
+                        + 3 * t_inv * (t**2) * p2[1]
+                        + t**3 * p3[1]
+                    )
+                    current_ring.append((bx, by))
+                current_x, current_y = x3, y3
+            else:
+                idx += 1
         elif current_cmd in ("S", "s"):
-            x2 = float(tokens[idx])
-            y2 = float(tokens[idx + 1])
-            x3 = float(tokens[idx + 2])
-            y3 = float(tokens[idx + 3])
-            idx += 4
-            if current_cmd == "s":
-                x2 += current_x
-                y2 += current_y
-                x3 += current_x
-                y3 += current_y
-            p0 = (current_x, current_y)
-            p1 = (2 * current_x - last_c_ctrl[0], 2 * current_y - last_c_ctrl[1])
-            p2 = (x2, y2)
-            p3 = (x3, y3)
-            last_c_ctrl = (x2, y2)
-            for step in range(1, samples_per_curve + 1):
-                t = step / samples_per_curve
-                t_inv = 1.0 - t
-                bx = (
-                    t_inv**3 * p0[0]
-                    + 3 * (t_inv**2) * t * p1[0]
-                    + 3 * t_inv * (t**2) * p2[0]
-                    + t**3 * p3[0]
-                )
-                by = (
-                    t_inv**3 * p0[1]
-                    + 3 * (t_inv**2) * t * p1[1]
-                    + 3 * t_inv * (t**2) * p2[1]
-                    + t**3 * p3[1]
-                )
-                current_ring.append((bx, by))
-            current_x, current_y = x3, y3
+            if idx + 3 < len(tokens):
+                x2 = float(tokens[idx])
+                y2 = float(tokens[idx + 1])
+                x3 = float(tokens[idx + 2])
+                y3 = float(tokens[idx + 3])
+                idx += 4
+                if current_cmd == "s":
+                    x2 += current_x
+                    y2 += current_y
+                    x3 += current_x
+                    y3 += current_y
+                p0 = (current_x, current_y)
+                p1 = (2 * current_x - last_c_ctrl[0], 2 * current_y - last_c_ctrl[1])
+                p2 = (x2, y2)
+                p3 = (x3, y3)
+                last_c_ctrl = (x2, y2)
+                for step in range(1, samples_per_curve + 1):
+                    t = step / samples_per_curve
+                    t_inv = 1.0 - t
+                    bx = (
+                        t_inv**3 * p0[0]
+                        + 3 * (t_inv**2) * t * p1[0]
+                        + 3 * t_inv * (t**2) * p2[0]
+                        + t**3 * p3[0]
+                    )
+                    by = (
+                        t_inv**3 * p0[1]
+                        + 3 * (t_inv**2) * t * p1[1]
+                        + 3 * t_inv * (t**2) * p2[1]
+                        + t**3 * p3[1]
+                    )
+                    current_ring.append((bx, by))
+                current_x, current_y = x3, y3
+            else:
+                idx += 1
         elif current_cmd in ("Q", "q"):
-            x1 = float(tokens[idx])
-            y1 = float(tokens[idx + 1])
-            x2 = float(tokens[idx + 2])
-            y2 = float(tokens[idx + 3])
-            idx += 4
-            if current_cmd == "q":
-                x1 += current_x
-                y1 += current_y
-                x2 += current_x
-                y2 += current_y
-            p0 = (current_x, current_y)
-            p1 = (x1, y1)
-            p2 = (x2, y2)
-            last_q_ctrl = (x1, y1)
-            for step in range(1, samples_per_curve + 1):
-                t = step / samples_per_curve
-                t_inv = 1.0 - t
-                bx = t_inv**2 * p0[0] + 2 * t_inv * t * p1[0] + t**2 * p2[0]
-                by = t_inv**2 * p0[1] + 2 * t_inv * t * p1[1] + t**2 * p2[1]
-                current_ring.append((bx, by))
-            current_x, current_y = x2, y2
+            if idx + 3 < len(tokens):
+                x1 = float(tokens[idx])
+                y1 = float(tokens[idx + 1])
+                x2 = float(tokens[idx + 2])
+                y2 = float(tokens[idx + 3])
+                idx += 4
+                if current_cmd == "q":
+                    x1 += current_x
+                    y1 += current_y
+                    x2 += current_x
+                    y2 += current_y
+                p0 = (current_x, current_y)
+                p1 = (x1, y1)
+                p2 = (x2, y2)
+                last_q_ctrl = (x1, y1)
+                for step in range(1, samples_per_curve + 1):
+                    t = step / samples_per_curve
+                    t_inv = 1.0 - t
+                    bx = t_inv**2 * p0[0] + 2 * t_inv * t * p1[0] + t**2 * p2[0]
+                    by = t_inv**2 * p0[1] + 2 * t_inv * t * p1[1] + t**2 * p2[1]
+                    current_ring.append((bx, by))
+                current_x, current_y = x2, y2
+            else:
+                idx += 1
         elif current_cmd in ("T", "t"):
-            x2 = float(tokens[idx])
-            y2 = float(tokens[idx + 1])
-            idx += 2
-            if current_cmd == "t":
-                x2 += current_x
-                y2 += current_y
-            p0 = (current_x, current_y)
-            p1 = (2 * current_x - last_q_ctrl[0], 2 * current_y - last_q_ctrl[1])
-            p2 = (x2, y2)
-            last_q_ctrl = p1
-            for step in range(1, samples_per_curve + 1):
-                t = step / samples_per_curve
-                t_inv = 1.0 - t
-                bx = t_inv**2 * p0[0] + 2 * t_inv * t * p1[0] + t**2 * p2[0]
-                by = t_inv**2 * p0[1] + 2 * t_inv * t * p1[1] + t**2 * p2[1]
-                current_ring.append((bx, by))
-            current_x, current_y = x2, y2
+            if idx + 1 < len(tokens):
+                x2 = float(tokens[idx])
+                y2 = float(tokens[idx + 1])
+                idx += 2
+                if current_cmd == "t":
+                    x2 += current_x
+                    y2 += current_y
+                p0 = (current_x, current_y)
+                p1 = (2 * current_x - last_q_ctrl[0], 2 * current_y - last_q_ctrl[1])
+                p2 = (x2, y2)
+                last_q_ctrl = p1
+                for step in range(1, samples_per_curve + 1):
+                    t = step / samples_per_curve
+                    t_inv = 1.0 - t
+                    bx = t_inv**2 * p0[0] + 2 * t_inv * t * p1[0] + t**2 * p2[0]
+                    by = t_inv**2 * p0[1] + 2 * t_inv * t * p1[1] + t**2 * p2[1]
+                    current_ring.append((bx, by))
+                current_x, current_y = x2, y2
+            else:
+                idx += 1
+        elif current_cmd in ("A", "a"):
+            if idx + 6 < len(tokens):
+                x = float(tokens[idx + 5])
+                y = float(tokens[idx + 6])
+                idx += 7
+                if current_cmd == "a":
+                    x += current_x
+                    y += current_y
+                current_x, current_y = x, y
+                current_ring.append((current_x, current_y))
+            else:
+                idx += 1
         elif current_cmd in ("Z", "z"):
             current_x, current_y = start_x, start_y
             current_ring.append((current_x, current_y))
@@ -491,7 +590,7 @@ def calculate_svg_path_area(d: str) -> float:
                     r"[-+]?(?:\d*\.\d+|\d+)(?:[eE][-+]?\d+)?", d
                 )
             ]
-            if len(nums) >= 4:
+            if len(nums) >= 6:
                 xs = nums[0::2]
                 ys = nums[1::2]
                 return float((max(xs) - min(xs)) * (max(ys) - min(ys)))
@@ -562,7 +661,6 @@ class VTracerCore:
             scale_factor: Optional scaling factor for path coordinates and dimensions (default 1.0).
             **kwargs: Extra parameters passed to vtracer.
         """
-        temp_input_path: Optional[str] = None
         dimensions: Tuple[int, int] = (0, 0)
 
         def _prepare_image_for_tracing(pil_img: Image.Image) -> Image.Image:
@@ -578,53 +676,56 @@ class VTracerCore:
                     return Image.alpha_composite(white_bg, rgba).convert("RGB")
             return pil_img
 
-        # Resolve image input and dimensions
-        if isinstance(image_input, (str, Path)):
-            input_path_obj = Path(image_input)
-            if not input_path_obj.exists():
-                raise FileNotFoundError(f"Image file not found: {image_input}")
-            with Image.open(input_path_obj) as img:
-                img.load()
-                dimensions = img.size
-                prepared = _prepare_image_for_tracing(img)
-                if prepared is not img:
-                    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f_in:
-                        temp_input_path = f_in.name
-                    prepared.save(temp_input_path, format="PNG")
-                    file_to_trace = temp_input_path
-                else:
-                    file_to_trace = str(input_path_obj)
-        elif isinstance(image_input, Image.Image):
-            dimensions = image_input.size
-            prepared = _prepare_image_for_tracing(image_input)
-            with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f_in:
-                temp_input_path = f_in.name
-            prepared.save(temp_input_path, format="PNG")
-            file_to_trace = temp_input_path
-        elif isinstance(image_input, (bytes, bytearray)):
-            with Image.open(io.BytesIO(image_input)) as img:
-                img.load()
-                dimensions = img.size
-                prepared = _prepare_image_for_tracing(img)
-            with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f_in:
-                temp_input_path = f_in.name
-                if prepared is not img:
-                    prepared.save(temp_input_path, format="PNG")
-                else:
-                    f_in.write(image_input)
-            file_to_trace = temp_input_path
-        else:
-            raise TypeError(
-                f"Unsupported image_input type: {type(image_input).__name__}. "
-                "Expected str, Path, PIL.Image.Image, or bytes."
-            )
-
-        length_threshold = kwargs.pop("length_threshold", segment_length)
-
-        with tempfile.NamedTemporaryFile(suffix=".svg", delete=False) as f_out:
-            temp_output_path = f_out.name
+        temp_input_path: Optional[str] = None
+        temp_output_path: Optional[str] = None
 
         try:
+            # Resolve image input and dimensions
+            if isinstance(image_input, (str, Path)):
+                input_path_obj = Path(image_input)
+                if not input_path_obj.exists():
+                    raise FileNotFoundError(f"Image file not found: {image_input}")
+                with Image.open(input_path_obj) as img:
+                    img.load()
+                    dimensions = img.size
+                    prepared = _prepare_image_for_tracing(img)
+                    if prepared is not img:
+                        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f_in:
+                            temp_input_path = f_in.name
+                        prepared.save(temp_input_path, format="PNG")
+                        file_to_trace = temp_input_path
+                    else:
+                        file_to_trace = str(input_path_obj)
+            elif isinstance(image_input, Image.Image):
+                dimensions = image_input.size
+                prepared = _prepare_image_for_tracing(image_input)
+                with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f_in:
+                    temp_input_path = f_in.name
+                prepared.save(temp_input_path, format="PNG")
+                file_to_trace = temp_input_path
+            elif isinstance(image_input, (bytes, bytearray)):
+                with Image.open(io.BytesIO(image_input)) as img:
+                    img.load()
+                    dimensions = img.size
+                    prepared = _prepare_image_for_tracing(img)
+                with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f_in:
+                    temp_input_path = f_in.name
+                    if prepared is not img:
+                        prepared.save(temp_input_path, format="PNG")
+                    else:
+                        f_in.write(image_input)
+                file_to_trace = temp_input_path
+            else:
+                raise TypeError(
+                    f"Unsupported image_input type: {type(image_input).__name__}. "
+                    "Expected str, Path, PIL.Image.Image, or bytes."
+                )
+
+            length_threshold = kwargs.pop("length_threshold", segment_length)
+
+            with tempfile.NamedTemporaryFile(suffix=".svg", delete=False) as f_out:
+                temp_output_path = f_out.name
+
             res = vtracer.convert_image_to_svg_py(
                 file_to_trace,
                 temp_output_path,
@@ -649,14 +750,26 @@ class VTracerCore:
                     os.remove(temp_input_path)
                 except OSError:
                     pass
-            if os.path.exists(temp_output_path):
+            if temp_output_path and os.path.exists(temp_output_path):
                 try:
                     os.remove(temp_output_path)
                 except OSError:
                     pass
 
         # Parse SVG to extract paths
-        root = ET.fromstring(svg_string)
+        clean_svg = re.sub(
+            r"<!DOCTYPE[^>\[]*(?:\[[\s\S]*?\])?\s*>",
+            "",
+            svg_string,
+            flags=re.IGNORECASE,
+        )
+        clean_svg = re.sub(
+            r"<!ENTITY[\s\S]*?>",
+            "",
+            clean_svg,
+            flags=re.IGNORECASE,
+        )
+        root = ET.fromstring(clean_svg)
 
         # Update dimensions from SVG root if not set
         if dimensions == (0, 0):

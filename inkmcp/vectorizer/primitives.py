@@ -85,7 +85,9 @@ def format_rect_path(
     corner_radius: float = 0.0,
 ) -> str:
     """Formats an exact SVG path string for a sharp or rounded rectangle."""
-    r = max(0.0, corner_radius)
+    if width <= 0.0 or height <= 0.0:
+        return ""
+    r = max(0.0, min(corner_radius, width / 2.0, height / 2.0))
     maxx = minx + width
     maxy = miny + height
 
@@ -99,7 +101,7 @@ def format_rect_path(
         )
 
     # Clamp radius to half of smallest dimension
-    r = min(r, width / 2.0, height / 2.0)
+    r = max(0.0, min(r, width / 2.0, height / 2.0))
     r_str = _format_coord(r)
 
     # Clockwise rounded rectangle with 4 circular arcs
@@ -204,7 +206,7 @@ def skeletonize_thin_loops_mat(
     xs = np.linspace(minx + est_w * 0.25, maxx - est_w * 0.25, num_samples)
 
     centerline_rot = []
-    y_span = (maxy - miny) * 2.0
+    y_span = max(1.0, (maxy - miny) * 2.0)
     for x in xs:
         scan_line = LineString([(x, miny - y_span), (x, maxy + y_span)])
         inter = rotated_poly.intersection(scan_line)
@@ -217,6 +219,12 @@ def skeletonize_thin_loops_mat(
                 longest = max(inter.geoms, key=lambda g: g.length)
                 mid_y = (longest.coords[0][1] + longest.coords[-1][1]) / 2.0
                 centerline_rot.append((x, mid_y))
+            elif inter.geom_type == "GeometryCollection":
+                lines = [g for g in inter.geoms if g.geom_type == "LineString"]
+                if lines:
+                    longest = max(lines, key=lambda g: g.length)
+                    mid_y = (longest.coords[0][1] + longest.coords[-1][1]) / 2.0
+                    centerline_rot.append((x, mid_y))
 
     if len(centerline_rot) < 2:
         return None

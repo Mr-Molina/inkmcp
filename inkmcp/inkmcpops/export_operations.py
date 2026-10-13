@@ -4,6 +4,7 @@ import tempfile
 import base64
 import os
 import re
+from pathlib import Path
 from typing import Dict, Any
 import subprocess
 from inkmcp.platform_utils import find_inkscape_executable
@@ -83,6 +84,7 @@ def export_document_image(extension_instance, svg, attributes: Dict[str, Any]) -
     """Export document as image"""
     temp_svg = None
     output_path = None
+    is_temp_output = False
     success = False
     return_base64 = False
     ALLOWED_FORMATS = {"png", "svg", "pdf", "eps", "ps", "emf", "wmf", "xaml"}
@@ -99,9 +101,21 @@ def export_document_image(extension_instance, svg, attributes: Dict[str, Any]) -
             return_base64 = str(return_base64_val).lower() == 'true'
         area = attributes.get('area', 'page')  # page, drawing, selection
 
-        # Generate temp output path
-        output_fd, output_path = tempfile.mkstemp(suffix=f'.{format_type}', prefix='inkscape_export_')
-        os.close(output_fd)  # Close the file descriptor
+        # Support optional output_path in attributes (LOGIC-103)
+        custom_output_path = attributes.get('output_path')
+        if custom_output_path:
+            resolved_path = Path(str(custom_output_path)).resolve()
+            allowed_roots = [Path.cwd().resolve(), Path(tempfile.gettempdir()).resolve()]
+            if not any(resolved_path == root or root in resolved_path.parents for root in allowed_roots):
+                return create_error_response(
+                    f"output_path must reside within current working directory or system temp directory: {custom_output_path}"
+                )
+            output_path = str(resolved_path)
+            is_temp_output = False
+        else:
+            is_temp_output = True
+            output_fd, output_path = tempfile.mkstemp(suffix=f'.{format_type}', prefix='inkscape_export_')
+            os.close(output_fd)  # Close the file descriptor
 
         # Save current document to temp SVG file
         temp_svg_fd, temp_svg = tempfile.mkstemp(suffix='.svg')
@@ -117,12 +131,12 @@ def export_document_image(extension_instance, svg, attributes: Dict[str, Any]) -
         else:
             export_area = '--export-area-page'
 
-        # Calculate DPI to respect max_size
+        # Calculate DPI to respect max_size (PERF-101)
         dpi = 96  # Default
-        if max_size:
+        if max_size > 0:
             width = _parse_svg_width(svg)
-            if max_size < width:
-                dpi = int((max_size / width) * 96)
+            if width > 0 and max_size < width:
+                dpi = max(1, int((max_size / width) * 96))
 
         inkscape_bin = str(find_inkscape_executable() or "inkscape")
         cmd = [
@@ -179,9 +193,9 @@ def export_document_image(extension_instance, svg, attributes: Dict[str, Any]) -
                 os.unlink(temp_svg)
             except OSError:
                 pass
-        # Clean up output file when base64 was returned or on failure
+        # Clean up output file when base64 was returned for temp files or on failure
         if output_path and os.path.exists(output_path):
-            if not success or return_base64:
+            if not success or (return_base64 and is_temp_output):
                 try:
                     os.unlink(output_path)
                 except OSError:

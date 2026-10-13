@@ -1,7 +1,6 @@
 """Unit tests for inkmcp.vectorizer.node_decimator."""
 
 import math
-import pytest
 
 from inkmcp.vectorizer.node_decimator import (
     NodeMetrics,

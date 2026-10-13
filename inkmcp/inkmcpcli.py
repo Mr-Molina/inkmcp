@@ -73,6 +73,7 @@ import re
 import io
 import tokenize
 import builtins
+import keyword
 from pathlib import Path
 from typing import Dict, List, Any, Optional
 
@@ -133,7 +134,7 @@ def parse_hybrid_blocks(code: str) -> List[tuple[str, str]]:
     lines = code.split('\n')
     blocks = []
     current_type = 'local'  # Default to local
-    current_lines = []
+    current_lines: List[str] = []
     
     for line in lines:
         stripped = line.strip()
@@ -162,7 +163,7 @@ def parse_hybrid_blocks(code: str) -> List[tuple[str, str]]:
     return blocks
 
 
-def serialize_context_variables(local_vars: Dict[str, Any], exclude_names: set = None) -> Dict[str, Any]:
+def serialize_context_variables(local_vars: Dict[str, Any], exclude_names: Optional[set[str]] = None) -> Dict[str, Any]:
     """
     Extract JSON-serializable variables from local execution context.
     
@@ -248,7 +249,7 @@ def execute_hybrid_code(client: 'InkscapeClient', code: str, args) -> Dict[str, 
         }
     
     # Shared context for variables
-    shared_context = {}
+    shared_context: Dict[str, Any] = {}
     
     # Track all outputs
     all_local_output = []
@@ -310,8 +311,12 @@ def execute_hybrid_code(client: 'InkscapeClient', code: str, args) -> Dict[str, 
                     violations = _validate_code_safety(block_code) or []
 
                 if violations:
-                    print(f"[Security] Block {block_idx + 1} skipped — "
-                          f"violations: {'; '.join(violations)}")
+                    sec_msg = (
+                        f"[Security] Block {block_idx + 1} skipped — "
+                        f"violations: {'; '.join(violations)}"
+                    )
+                    print(sec_msg)
+                    combined_errors.append(sec_msg)
                     continue
                 
                 # Capture output
@@ -371,9 +376,15 @@ def execute_hybrid_code(client: 'InkscapeClient', code: str, args) -> Dict[str, 
                 # We need to inject the shared context as variable assignments
                 context_injection = []
                 for key, value in shared_context.items():
-                    if str(key).isidentifier():
+                    key_str = str(key)
+                    if (
+                        key_str.isidentifier()
+                        and not keyword.iskeyword(key_str)
+                        and key_str not in {'svg', 'document', 'inkex', 'self', '__builtins__'}
+                        and not key_str.startswith('_')
+                    ):
                         # Serialize the value as Python literal using repr()
-                        context_injection.append(f"{key} = {repr(value)}")
+                        context_injection.append(f"{key_str} = {repr(value)}")
                 
                 # Combine context injection with user code
                 full_inkscape_code = '\n'.join(context_injection) + '\n' + cleaned_code if context_injection else cleaned_code
@@ -420,8 +431,16 @@ def execute_hybrid_code(client: 'InkscapeClient', code: str, args) -> Dict[str, 
                     # Extract variables from Inkscape execution and add to shared context
                     # This enables Inkscape → Local variable flow
                     inkscape_vars = data.get('local_variables', {})
-                    if inkscape_vars:
-                        shared_context.update(inkscape_vars)
+                    if inkscape_vars and isinstance(inkscape_vars, dict):
+                        for k, v in inkscape_vars.items():
+                            key_str = str(k)
+                            if (
+                                key_str.isidentifier()
+                                and not keyword.iskeyword(key_str)
+                                and key_str not in {'svg', 'document', 'inkex', 'self', '__builtins__'}
+                                and not key_str.startswith('_')
+                            ):
+                                shared_context[key_str] = v
                     
                     if not inkscape_result['execution_successful']:
                         # Fail fast on Inkscape errors
@@ -450,21 +469,30 @@ def execute_hybrid_code(client: 'InkscapeClient', code: str, args) -> Dict[str, 
     # Build final result
     final_output = ''.join(all_local_output) if all_local_output else ''
     final_errors = '\n'.join(combined_errors) if combined_errors else None
-    
-    return {
-        "success": True,
+    has_errors = bool(combined_errors)
+
+    result_dict: Dict[str, Any] = {
+        "success": not has_errors,
         "response": {
-            "status": "success",
+            "status": "error" if has_errors else "success",
             "data": {
-                "message": f"Hybrid execution completed ({len(blocks)} blocks)",
+                "message": (
+                    f"Hybrid execution completed ({len(blocks)} blocks)"
+                    if not has_errors
+                    else f"Hybrid execution failed ({len(blocks)} blocks)"
+                ),
                 "blocks_executed": len(blocks),
                 "local_output": final_output,
                 "inkscape_results": all_inkscape_results,
                 "errors": final_errors,
-                "execution_successful": final_errors is None
-            }
-        }
+                "execution_successful": not has_errors,
+            },
+        },
     }
+    if has_errors:
+        result_dict["error"] = final_errors
+
+    return result_dict
 
 
 def parse_children_array(children_str: str) -> List[Dict[str, Any]]:
@@ -500,10 +528,41 @@ def parse_children_array(children_str: str) -> List[Dict[str, Any]]:
     children = []
     brace_count = 0
     current_child = ""
+    in_quote: Optional[str] = None
+    escaped = False
     i = 0
 
     while i < len(children_str):
         char = children_str[i]
+
+        if escaped:
+            escaped = False
+            if brace_count > 0:
+                current_child += char
+            i += 1
+            continue
+
+        if char == '\\':
+            escaped = True
+            if brace_count > 0:
+                current_child += char
+            i += 1
+            continue
+
+        if in_quote:
+            if char == in_quote:
+                in_quote = None
+            if brace_count > 0:
+                current_child += char
+            i += 1
+            continue
+
+        if char in ("'", '"'):
+            in_quote = char
+            if brace_count > 0:
+                current_child += char
+            i += 1
+            continue
 
         if char == '{':
             brace_count += 1
@@ -574,7 +633,7 @@ def parse_tag_and_attributes(content: str) -> Dict[str, Any] | None:
     # Parse attributes using existing logic
     attributes = parse_attributes(attr_str)
 
-    element_data = {
+    element_data: Dict[str, Any] = {
         "tag": tag,
         "attributes": attributes
     }
@@ -768,7 +827,7 @@ class InkscapeClient:
             try:
                 from inkmcp.inkscape_mcp_server import InkscapeConnection
             except ImportError:
-                from inkscape_mcp_server import InkscapeConnection
+                from inkscape_mcp_server import InkscapeConnection  # type: ignore[import-not-found, no-redef]
 
             conn = InkscapeConnection(allow_headless=True)
             result = conn.execute_operation(element_data)
@@ -945,8 +1004,7 @@ Examples:
             if args.file:
                 abs_file_path = os.path.abspath(args.file)
                 if args.strict_boundary:
-                    expected_boundary = os.path.abspath(os.getcwd())
-                    if not abs_file_path.startswith(expected_boundary):
+                    if not Path(abs_file_path).resolve().is_relative_to(Path.cwd().resolve()):
                         print(f"[Security Error] ❌ File path outside expected boundary: {abs_file_path}", file=sys.stderr)
                         return 1
 
@@ -992,12 +1050,12 @@ Examples:
             try:
                 from inkmcp.inkscape_mcp_server import InkscapeConnection
             except ImportError:
-                from inkscape_mcp_server import InkscapeConnection
+                from inkscape_mcp_server import InkscapeConnection  # type: ignore[import-not-found, no-redef]
 
             try:
                 from inkmcp.inkmcpops import vectorize_image_operation
             except ImportError:
-                from inkmcpops import vectorize_image_operation
+                from inkmcpops import vectorize_image_operation  # type: ignore[import-not-found, no-redef]
 
             conn = InkscapeConnection(allow_headless=True)
             backend = conn.backend
@@ -1051,8 +1109,7 @@ Examples:
             # SEC-011: Normalize paths and apply strict boundary mode if requested
             abs_file_path = os.path.abspath(args.file)
             if args.strict_boundary:
-                expected_boundary = os.path.abspath(os.getcwd())
-                if not abs_file_path.startswith(expected_boundary):
+                if not Path(abs_file_path).resolve().is_relative_to(Path.cwd().resolve()):
                     print(f"[Security Error] ❌ File path outside expected boundary: {abs_file_path}", file=sys.stderr)
                     return 1
 
@@ -1081,15 +1138,19 @@ Examples:
                         print(json.dumps(result))
                 else:
                     # Minimal human-readable format - only print() output
-                    if result.get('success'):
-                        data = result.get('response', {}).get('data', {})
+                    data = result.get('response', {}).get('data', {})
+                    exec_ok = result.get('success') and (data.get('execution_successful', True) if data else True)
+                    if exec_ok:
                         output = data.get('local_output', '').rstrip()
                         if output:
                             print(output)
                     else:
-                        print(f"Error: {result.get('error', 'Unknown error')}", file=sys.stderr)
+                        err_msg = result.get('error') or (data.get('errors') if data else None) or 'Unknown error'
+                        print(f"Error: {err_msg}", file=sys.stderr)
                 
-                return 0 if result.get('success') else 1
+                data = result.get('response', {}).get('data', {})
+                is_success = bool(result.get('success')) and (data.get('execution_successful', True) if data else True)
+                return 0 if is_success else 1
                 
             elif args.tag == "execute-code":
                 # For execute-code, treat file content as Python code
@@ -1119,8 +1180,10 @@ Examples:
                     batch_results = []
                     for line_num, line in enumerate(lines, 1):
                         try:
-                            element_data = parse_tag_and_attributes(line)
-                            if element_data:
+                            element_data = parse_command_string(line)
+                            if element_data and element_data.get("tag"):
+                                if element_data.get('tag') == 'execute-code' and 'code' in element_data.get('attributes', {}):
+                                    element_data['attributes']['code'] = strip_python_comments(element_data['attributes']['code'])
                                 result = client.execute_command(element_data)
                                 batch_results.append({
                                     "line": line_num,
@@ -1158,8 +1221,8 @@ Examples:
                     all_success = True
                     for line_num, line in enumerate(lines, 1):
                         try:
-                            element_data = parse_tag_and_attributes(line)
-                            if element_data:
+                            element_data = parse_command_string(line)
+                            if element_data and element_data.get("tag"):
                                 # Strip comments if this is execute-code
                                 if element_data.get('tag') == 'execute-code' and 'code' in element_data.get('attributes', {}):
                                     element_data['attributes']['code'] = strip_python_comments(element_data['attributes']['code'])

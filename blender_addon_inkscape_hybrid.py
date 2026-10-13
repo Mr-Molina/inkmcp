@@ -13,6 +13,16 @@ Usage:
 2. Text Editor > Run Hybrid Code (or Ctrl+Shift+H)
 """
 
+import bpy
+import subprocess
+import json
+import sys
+import os
+import re
+import shutil
+from bpy.types import Operator, AddonPreferences
+from bpy.props import StringProperty
+
 bl_info = {
     "name": "Inkscape Hybrid Execution",
     "description": "Execute hybrid code in Blender and Inkscape",
@@ -22,15 +32,6 @@ bl_info = {
     "location": "Text Editor > Run Hybrid Code",
     "category": "Scripting",
 }
-
-import bpy
-import subprocess
-import json
-import sys
-import os
-import re
-from bpy.types import Operator, AddonPreferences
-from bpy.props import StringProperty
 
 # Import the hybrid executor functions
 # (We'll inline them here to make the addon self-contained)
@@ -79,7 +80,7 @@ def serialize_variables(local_vars, exclude_names=None):
         try:
             json.dumps(value)
             serializable[key] = value
-        except (TypeError, ValueError) as e:
+        except (TypeError, ValueError):
             excluded.append((key, f"not JSON-serializable ({type_name})"))
     
     # Warn about excluded variables
@@ -93,6 +94,30 @@ def serialize_variables(local_vars, exclude_names=None):
     return serializable
 
 
+def get_python_executable() -> str:
+    """Resolve a real Python binary for subprocess invocation.
+
+    When running inside Blender, sys.executable points to blender.exe.
+    Resolves the bundled or system python executable instead.
+    """
+    exe = sys.executable
+    if "blender" in os.path.basename(exe).lower():
+        candidates = [
+            os.path.join(sys.prefix, "bin", "python.exe"),
+            os.path.join(sys.prefix, "python.exe"),
+            os.path.join(os.path.dirname(exe), "python.exe"),
+            os.path.join(sys.prefix, "bin", "python3"),
+            os.path.join(sys.prefix, "python3"),
+        ]
+        for candidate in candidates:
+            if os.path.isfile(candidate):
+                return candidate
+        system_py = shutil.which("python") or shutil.which("python3")
+        if system_py:
+            return system_py
+    return exe
+
+
 def execute_inkscape_block(code, variables, inkmcp_cli_path):
     """Execute code block in Inkscape via inkmcpcli."""
     if not inkmcp_cli_path:
@@ -102,7 +127,6 @@ def execute_inkscape_block(code, variables, inkmcp_cli_path):
             'variables': {}
         }
     
-    import os
     if not os.path.exists(inkmcp_cli_path):
         return {'success': False, 'error': f"CLI path does not exist: {inkmcp_cli_path}", 'variables': {}}
     if not os.path.isfile(inkmcp_cli_path):
@@ -122,22 +146,17 @@ def execute_inkscape_block(code, variables, inkmcp_cli_path):
                 f"_inkmcp_vars = json.loads({json.dumps(serialized_json)})",
             ]
             for key in variables:
-                if not key.isidentifier(): continue
+                if not key.isidentifier():
+                    continue
                 var_injections.append(f"{key} = _inkmcp_vars[{json.dumps(key)}]")
             var_injections.append("del _inkmcp_vars")
             full_code = '\n'.join(var_injections) + '\n' + code
-        except Exception:
-            var_injections = []
-            for key, value in variables.items():
-                if not key.isidentifier(): continue
-                try:
-                    repr_value = repr(value)
-                    if repr_value and repr_value != '' and not repr_value.startswith('<'):
-                        var_injections.append(f"{key} = {repr_value}")
-                except Exception as e:
-                    import logging
-                    logging.getLogger(__name__).warning("Variable '%s' dropped during serialization: %s", key, e)
-            full_code = '\n'.join(var_injections) + '\n' + code if var_injections else code
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).warning(
+                "Variable serialization failed, executing without injected variables: %s", e
+            )
+            full_code = code
     else:
         full_code = code
     
@@ -149,12 +168,15 @@ def execute_inkscape_block(code, variables, inkmcp_cli_path):
             f.write(full_code)
             temp_file = f.name
         
+        py_exe = get_python_executable()
+        creationflags = 0x08000000 if os.name == 'nt' else 0
         try:
             result = subprocess.run(
-                [sys.executable, inkmcp_cli_path, 'execute-code', '--pretty', '-f', temp_file],
+                [py_exe, inkmcp_cli_path, 'execute-code', '--pretty', '-f', temp_file],
                 capture_output=True,
                 text=True,
-                timeout=30
+                timeout=30,
+                creationflags=creationflags,
             )
         finally:
             try:

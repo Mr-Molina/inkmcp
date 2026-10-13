@@ -127,6 +127,16 @@ _inkscape_executor = concurrent.futures.ThreadPoolExecutor(
 )
 
 
+def _get_executor() -> concurrent.futures.ThreadPoolExecutor:
+    """Get or recreate the dedicated ThreadPoolExecutor for Inkscape operations."""
+    global _inkscape_executor
+    if getattr(_inkscape_executor, "_shutdown", False):
+        _inkscape_executor = concurrent.futures.ThreadPoolExecutor(
+            max_workers=4, thread_name_prefix="inkscape"
+        )
+    return _inkscape_executor
+
+
 def get_inkscape_connection(allow_headless: bool = False) -> InkscapeConnection:
     """Get or create Inkscape connection"""
     global _inkscape_connection
@@ -159,7 +169,8 @@ async def server_lifespan(server: FastMCP) -> AsyncIterator[Dict[str, Any]]:
     try:
         # Test connection on startup
         try:
-            await asyncio.get_event_loop().run_in_executor(_inkscape_executor, get_inkscape_connection)
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(_get_executor(), get_inkscape_connection)
             logger.info("Successfully connected to Inkscape on startup")
         except Exception as e:
             logger.warning("Could not connect to Inkscape on startup: %s", e)
@@ -363,8 +374,9 @@ async def inkscape_operation(ctx: Context, command: str) -> Union[str, ImageCont
     """
     response_file = None
     try:
-        loop = asyncio.get_event_loop()
-        connection = await loop.run_in_executor(_inkscape_executor, get_inkscape_connection)
+        loop = asyncio.get_running_loop()
+        executor = _get_executor()
+        connection = await loop.run_in_executor(executor, get_inkscape_connection)
 
         # Create unique response file for this operation
         response_fd, response_file = tempfile.mkstemp(
@@ -376,7 +388,7 @@ async def inkscape_operation(ctx: Context, command: str) -> Union[str, ImageCont
         try:
             from inkmcp.inkmcpcli import parse_command_string
         except ImportError:
-            from inkmcpcli import parse_command_string
+            from inkmcpcli import parse_command_string  # type: ignore[no-redef,import-not-found]
 
         parsed_data = parse_command_string(command)
 
@@ -386,7 +398,7 @@ async def inkscape_operation(ctx: Context, command: str) -> Union[str, ImageCont
         logger.info("Executing command: %s", command)
         logger.debug("Parsed data: %s", parsed_data)
 
-        result = await loop.run_in_executor(_inkscape_executor, connection.execute_operation, parsed_data)
+        result = await loop.run_in_executor(executor, connection.execute_operation, parsed_data)
 
         # Handle image export special case
         if (
@@ -528,6 +540,34 @@ async def vectorize_image(
     if mode not in valid_modes:
         return f"❌ **Vectorization Failed**: Unsupported mode: '{mode}'. Must be 'cut_ready', 'layered', 'silhouette', or 'coloring_book'"
 
+    # SEC-011: Validate image_path exists
+    try:
+        resolved_img = Path(image_path).resolve()
+        image_exists = resolved_img.is_file()
+    except Exception:
+        image_exists = False
+
+    if not image_exists:
+        return f"❌ **Vectorization Failed**: Image file not found: {image_path}"
+
+    # SEC-011: Validate output_path resides within workspace or temp_dir unless external paths are allowed
+    if output_path and str(output_path).strip():
+        allow_external = os.environ.get("INKMCP_ALLOW_EXTERNAL_PATHS") == "1"
+        if not allow_external:
+            try:
+                resolved_out = Path(output_path).resolve()
+                temp_root = Path(tempfile.gettempdir()).resolve()
+                cwd_root = Path.cwd().resolve()
+                is_safe = resolved_out.is_relative_to(temp_root) or resolved_out.is_relative_to(cwd_root)
+            except Exception:
+                is_safe = False
+
+            if not is_safe:
+                return (
+                    f"❌ **Vectorization Failed**: Output path '{output_path}' must reside within "
+                    "the workspace directory or system temporary directory."
+                )
+
     try:
         loop = asyncio.get_running_loop()
     except RuntimeError:
@@ -537,7 +577,7 @@ async def vectorize_image(
     if inject_to_inkscape:
         try:
             connection = await loop.run_in_executor(
-                _inkscape_executor, get_inkscape_connection
+                _get_executor(), get_inkscape_connection
             )
             backend = connection.backend if connection else None
         except Exception as e:
@@ -568,11 +608,11 @@ async def vectorize_image(
     try:
         from inkmcp.inkmcpops import vectorize_image_operation
     except ImportError:
-        from inkmcpops import vectorize_image_operation
+        from inkmcpops import vectorize_image_operation  # type: ignore[no-redef,import-not-found]
 
     try:
         result = await loop.run_in_executor(
-            _inkscape_executor,
+            _get_executor(),
             vectorize_image_operation,
             params,
             backend,

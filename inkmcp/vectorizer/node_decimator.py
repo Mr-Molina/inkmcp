@@ -3,9 +3,8 @@
 from dataclasses import dataclass
 import math
 import re
-from typing import List, Optional, Tuple
+from typing import List, Tuple
 
-import numpy as np
 
 from inkmcp.vectorizer.core import _format_coord
 
@@ -80,7 +79,8 @@ def parse_path_commands(d_str: str) -> List[Tuple[str, List[float]]]:
             continue
 
         if curr_cmd in ("M", "m"):
-            if idx + 1 >= len(raw_tokens) or isinstance(raw_tokens[idx], str):
+            if idx + 1 >= len(raw_tokens) or isinstance(raw_tokens[idx], str) or isinstance(raw_tokens[idx + 1], str):
+                idx += 1
                 continue
             x = float(raw_tokens[idx])
             y = float(raw_tokens[idx + 1])
@@ -94,7 +94,8 @@ def parse_path_commands(d_str: str) -> List[Tuple[str, List[float]]]:
             curr_cmd = "L" if curr_cmd == "M" else "l"
 
         elif curr_cmd in ("L", "l"):
-            if idx + 1 >= len(raw_tokens) or isinstance(raw_tokens[idx], str):
+            if idx + 1 >= len(raw_tokens) or isinstance(raw_tokens[idx], str) or isinstance(raw_tokens[idx + 1], str):
+                idx += 1
                 continue
             x = float(raw_tokens[idx])
             y = float(raw_tokens[idx + 1])
@@ -379,11 +380,11 @@ def _generate_bezier(
 
     # Schneider stability criterion: determinant well-conditioned and alphas strictly bounded by chord
     if abs(det) > 1e-5 * denom_scale:
-        a1 = (x0 * c11 - x1 * c01) / det
-        a2 = (c00 * x1 - c01 * x0) / det
-        if 0.0 < a1 <= chord and 0.0 < a2 <= chord:
-            alpha1 = a1
-            alpha2 = a2
+        alpha1_calc = (x0 * c11 - x1 * c01) / det
+        alpha2_calc = (c00 * x1 - c01 * x0) / det
+        if 0.0 < alpha1_calc <= chord and 0.0 < alpha2_calc <= chord:
+            alpha1 = alpha1_calc
+            alpha2 = alpha2_calc
 
     p1 = (p0[0] + alpha1 * t_start[0], p0[1] + alpha1 * t_start[1])
     p2 = (p3[0] + alpha2 * t_end[0], p3[1] + alpha2 * t_end[1])
@@ -412,10 +413,11 @@ def _fit_schneider_recursive(
     t_start: Tuple[float, float],
     t_end: Tuple[float, float],
     max_error: float,
+    depth: int = 0,
 ) -> List[Tuple[Tuple[float, float], Tuple[float, float], Tuple[float, float], Tuple[float, float]]]:
     """Recursive Schneider curve fitting."""
     n = len(points)
-    if n <= 2:
+    if n <= 2 or depth > 32:
         p0 = points[0]
         p3 = points[-1]
         chord = _dist(p0, p3)
@@ -452,8 +454,8 @@ def _fit_schneider_recursive(
 
     neg_center = (-center_tangent[0], -center_tangent[1])
 
-    left_curves = _fit_schneider_recursive(points[: split_idx + 1], t_start, neg_center, max_error)
-    right_curves = _fit_schneider_recursive(points[split_idx:], center_tangent, t_end, max_error)
+    left_curves = _fit_schneider_recursive(points[: split_idx + 1], t_start, neg_center, max_error, depth + 1)
+    right_curves = _fit_schneider_recursive(points[split_idx:], center_tangent, t_end, max_error, depth + 1)
     return left_curves + right_curves
 
 

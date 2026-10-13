@@ -1,32 +1,4 @@
-import ctypes
-from ctypes import wintypes
 import sys
-
-u32 = ctypes.windll.user32
-k32 = ctypes.windll.kernel32
-
-# --- Proper argtypes/restype declarations (prevents 64-bit HWND truncation) ---
-u32.OpenDesktopW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
-u32.OpenDesktopW.restype = wintypes.HANDLE
-u32.SetThreadDesktop.argtypes = [wintypes.HANDLE]
-u32.SetThreadDesktop.restype = wintypes.BOOL
-u32.CloseDesktop.argtypes = [wintypes.HANDLE]
-u32.CloseDesktop.restype = wintypes.BOOL
-u32.EnumWindows.restype = wintypes.BOOL
-u32.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
-u32.GetWindowThreadProcessId.restype = wintypes.DWORD
-u32.GetWindowTextW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
-u32.GetWindowTextW.restype = ctypes.c_int
-u32.GetClassNameW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
-u32.GetClassNameW.restype = ctypes.c_int
-u32.IsWindowVisible.argtypes = [wintypes.HWND]
-u32.IsWindowVisible.restype = wintypes.BOOL
-u32.ShowWindow.argtypes = [wintypes.HWND, ctypes.c_int]
-u32.ShowWindow.restype = wintypes.BOOL
-u32.SetForegroundWindow.argtypes = [wintypes.HWND]
-u32.SetForegroundWindow.restype = wintypes.BOOL
-u32.BringWindowToTop.argtypes = [wintypes.HWND]
-u32.BringWindowToTop.restype = wintypes.BOOL
 
 # --- System-class denylist: never interact with these window classes ---
 SYSTEM_DENYLIST_CLASSES = {
@@ -36,13 +8,67 @@ SYSTEM_DENYLIST_CLASSES = {
     'GDI+ Hook Window Class',
 }
 
+# --- System-title denylist: never interact with these internal system windows ---
+SYSTEM_DENYLIST_TITLES = (
+    'SystemResourceNotifyWindow',
+    'MediaContextNotificationWindow',
+    'DDE Server Window',
+    'Hidden Window',
+)
+
 # Upper-bound abort threshold (Invariant 52)
 MAX_MATCHING_WINDOWS = 5
 
+if sys.platform != "win32":
+    u32 = None
+    k32 = None
+else:
+    import ctypes
+    from ctypes import wintypes
+
+    u32 = ctypes.windll.user32
+    k32 = ctypes.windll.kernel32
+
+    # --- Proper argtypes/restype declarations (prevents 64-bit HWND truncation) ---
+    u32.OpenDesktopW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    u32.OpenDesktopW.restype = wintypes.HANDLE
+    u32.SetThreadDesktop.argtypes = [wintypes.HANDLE]
+    u32.SetThreadDesktop.restype = wintypes.BOOL
+    u32.CloseDesktop.argtypes = [wintypes.HANDLE]
+    u32.CloseDesktop.restype = wintypes.BOOL
+    u32.EnumWindows.restype = wintypes.BOOL
+    u32.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
+    u32.GetWindowThreadProcessId.restype = wintypes.DWORD
+    u32.GetWindowTextW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
+    u32.GetWindowTextW.restype = ctypes.c_int
+    u32.GetClassNameW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
+    u32.GetClassNameW.restype = ctypes.c_int
+    u32.IsWindowVisible.argtypes = [wintypes.HWND]
+    u32.IsWindowVisible.restype = wintypes.BOOL
+    u32.ShowWindow.argtypes = [wintypes.HWND, ctypes.c_int]
+    u32.ShowWindow.restype = wintypes.BOOL
+    u32.SetForegroundWindow.argtypes = [wintypes.HWND]
+    u32.SetForegroundWindow.restype = wintypes.BOOL
+    u32.BringWindowToTop.argtypes = [wintypes.HWND]
+    u32.BringWindowToTop.restype = wintypes.BOOL
+
 
 def main():
+    if sys.platform != "win32":
+        print("ERROR: focus_default_desktop.py is only supported on Windows.", file=sys.stderr)
+        return
+
     # Only target Inkscape or a specific PID explicitly passed as an argument
-    target_pid = int(sys.argv[1]) if len(sys.argv) > 1 else None
+    target_pid = None
+    if len(sys.argv) > 1:
+        try:
+            target_pid = int(sys.argv[1])
+        except ValueError:
+            print(f"ERROR: target_pid must be an integer, got: {sys.argv[1]!r}", file=sys.stderr)
+            return
+        if target_pid <= 0:
+            print(f"ERROR: Invalid target_pid: {target_pid}. Must be > 0 (Invariant 52).", file=sys.stderr)
+            return
 
     DESKTOP_ALL = 0x01FF
     hdesk = u32.OpenDesktopW("Default", 0, False, DESKTOP_ALL)
@@ -62,7 +88,7 @@ def main():
         # Denylist check first — skip system window classes immediately
         cls = ctypes.create_unicode_buffer(512)
         u32.GetClassNameW(hwnd, cls, 512)
-        if cls.value in SYSTEM_DENYLIST_CLASSES:
+        if cls.value in SYSTEM_DENYLIST_CLASSES or cls.value.startswith("HwndWrapper"):
             return True
 
         pid = wintypes.DWORD()
@@ -83,6 +109,10 @@ def main():
         buf = ctypes.create_unicode_buffer(512)
         u32.GetWindowTextW(hwnd, buf, 512)
         title = buf.value.strip()
+
+        # Denylist check for internal system notification titles
+        if any(denied_title in title for denied_title in SYSTEM_DENYLIST_TITLES):
+            return True
 
         # If no PID was passed, strictly match only Inkscape windows
         is_inkscape = "Inkscape" in title or cls.value.startswith("gdkWindowToplevel")

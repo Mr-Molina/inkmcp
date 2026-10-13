@@ -23,52 +23,8 @@ import argparse
 import json
 from pathlib import Path
 
-if sys.platform != "win32":
-    print("Error: inspect_desktop_windows.py is only supported on Windows.", file=sys.stderr)
-    sys.exit(1)
-
 import ctypes
 from ctypes import wintypes
-
-# Win32 Function Signatures & Types
-u32 = ctypes.windll.user32
-k32 = ctypes.windll.kernel32
-gdi32 = ctypes.windll.gdi32
-
-# User32 Signatures
-u32.OpenDesktopW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
-u32.OpenDesktopW.restype = wintypes.HANDLE
-
-u32.SetThreadDesktop.argtypes = [wintypes.HANDLE]
-u32.SetThreadDesktop.restype = wintypes.BOOL
-
-u32.CloseDesktop.argtypes = [wintypes.HANDLE]
-u32.CloseDesktop.restype = wintypes.BOOL
-
-WNDENUMPROC = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
-u32.EnumWindows.argtypes = [WNDENUMPROC, wintypes.LPARAM]
-u32.EnumWindows.restype = wintypes.BOOL
-
-u32.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
-u32.GetWindowThreadProcessId.restype = wintypes.DWORD
-
-u32.GetWindowTextLengthW.argtypes = [wintypes.HWND]
-u32.GetWindowTextLengthW.restype = ctypes.c_int
-
-u32.GetWindowTextW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
-u32.GetWindowTextW.restype = ctypes.c_int
-
-u32.GetClassNameW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
-u32.GetClassNameW.restype = ctypes.c_int
-
-u32.IsWindowVisible.argtypes = [wintypes.HWND]
-u32.IsWindowVisible.restype = wintypes.BOOL
-
-u32.IsIconic.argtypes = [wintypes.HWND]  # Minimized
-u32.IsIconic.restype = wintypes.BOOL
-
-u32.IsZoomed.argtypes = [wintypes.HWND]  # Maximized
-u32.IsZoomed.restype = wintypes.BOOL
 
 class RECT(ctypes.Structure):
     _fields_ = [
@@ -78,30 +34,140 @@ class RECT(ctypes.Structure):
         ("bottom", wintypes.LONG),
     ]
 
-u32.GetWindowRect.argtypes = [wintypes.HWND, ctypes.POINTER(RECT)]
-u32.GetWindowRect.restype = wintypes.BOOL
+SYSTEM_CLASSES = {
+    "Progman", "WorkerW", "Shell_TrayWnd", "Shell_SecondaryTrayWnd",
+    "IME", "MSCTFIME UI", "CiceroUIWndFrame", "Windows.UI.Core.CoreWindow",
+    "ApplicationFrameWindow", "SecHealth Window Class", "GDI+ Hook Window Class",
+}
 
-# Kernel32 Signatures for Process Image Resolution
 PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
-k32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
-k32.OpenProcess.restype = wintypes.HANDLE
 
-k32.QueryFullProcessImageNameW.argtypes = [
-    wintypes.HANDLE,
-    wintypes.DWORD,
-    wintypes.LPWSTR,
-    ctypes.POINTER(wintypes.DWORD),
-]
-k32.QueryFullProcessImageNameW.restype = wintypes.BOOL
+if sys.platform == "win32":
+    # Win32 Function Signatures & Types
+    u32 = ctypes.windll.user32
+    k32 = ctypes.windll.kernel32
+    gdi32 = ctypes.windll.gdi32
 
-k32.CloseHandle.argtypes = [wintypes.HANDLE]
-k32.CloseHandle.restype = wintypes.BOOL
+    # User32 Signatures
+    u32.OpenDesktopW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    u32.OpenDesktopW.restype = wintypes.HANDLE
+
+    u32.SetThreadDesktop.argtypes = [wintypes.HANDLE]
+    u32.SetThreadDesktop.restype = wintypes.BOOL
+
+    u32.CloseDesktop.argtypes = [wintypes.HANDLE]
+    u32.CloseDesktop.restype = wintypes.BOOL
+
+    WNDENUMPROC = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+    u32.EnumWindows.argtypes = [WNDENUMPROC, wintypes.LPARAM]
+    u32.EnumWindows.restype = wintypes.BOOL
+
+    u32.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
+    u32.GetWindowThreadProcessId.restype = wintypes.DWORD
+
+    u32.GetWindowTextLengthW.argtypes = [wintypes.HWND]
+    u32.GetWindowTextLengthW.restype = ctypes.c_int
+
+    u32.GetWindowTextW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
+    u32.GetWindowTextW.restype = ctypes.c_int
+
+    u32.GetClassNameW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
+    u32.GetClassNameW.restype = ctypes.c_int
+
+    u32.IsWindowVisible.argtypes = [wintypes.HWND]
+    u32.IsWindowVisible.restype = wintypes.BOOL
+
+    u32.IsIconic.argtypes = [wintypes.HWND]  # Minimized
+    u32.IsIconic.restype = wintypes.BOOL
+
+    u32.IsZoomed.argtypes = [wintypes.HWND]  # Maximized
+    u32.IsZoomed.restype = wintypes.BOOL
+
+    u32.GetWindowRect.argtypes = [wintypes.HWND, ctypes.POINTER(RECT)]
+    u32.GetWindowRect.restype = wintypes.BOOL
+
+    u32.GetForegroundWindow.argtypes = []
+    u32.GetForegroundWindow.restype = wintypes.HWND
+
+    u32.AttachThreadInput.argtypes = [wintypes.DWORD, wintypes.DWORD, wintypes.BOOL]
+    u32.AttachThreadInput.restype = wintypes.BOOL
+
+    u32.ShowWindow.argtypes = [wintypes.HWND, ctypes.c_int]
+    u32.ShowWindow.restype = wintypes.BOOL
+
+    u32.SetForegroundWindow.argtypes = [wintypes.HWND]
+    u32.SetForegroundWindow.restype = wintypes.BOOL
+
+    u32.BringWindowToTop.argtypes = [wintypes.HWND]
+    u32.BringWindowToTop.restype = wintypes.BOOL
+
+    u32.GetDC.argtypes = [wintypes.HWND]
+    u32.GetDC.restype = wintypes.HDC
+
+    u32.ReleaseDC.argtypes = [wintypes.HWND, wintypes.HDC]
+    u32.ReleaseDC.restype = ctypes.c_int
+
+    # Kernel32 Signatures for Process Image Resolution
+    k32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    k32.OpenProcess.restype = wintypes.HANDLE
+
+    k32.QueryFullProcessImageNameW.argtypes = [
+        wintypes.HANDLE,
+        wintypes.DWORD,
+        wintypes.LPWSTR,
+        ctypes.POINTER(wintypes.DWORD),
+    ]
+    k32.QueryFullProcessImageNameW.restype = wintypes.BOOL
+
+    k32.CloseHandle.argtypes = [wintypes.HANDLE]
+    k32.CloseHandle.restype = wintypes.BOOL
+
+    k32.GetCurrentThreadId.argtypes = []
+    k32.GetCurrentThreadId.restype = wintypes.DWORD
+
+    # GDI32 Signatures
+    gdi32.CreateCompatibleDC.argtypes = [wintypes.HDC]
+    gdi32.CreateCompatibleDC.restype = wintypes.HDC
+
+    gdi32.CreateCompatibleBitmap.argtypes = [wintypes.HDC, ctypes.c_int, ctypes.c_int]
+    gdi32.CreateCompatibleBitmap.restype = wintypes.HBITMAP
+
+    gdi32.SelectObject.argtypes = [wintypes.HDC, wintypes.HGDIOBJ]
+    gdi32.SelectObject.restype = wintypes.HGDIOBJ
+
+    gdi32.BitBlt.argtypes = [
+        wintypes.HDC,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_int,
+        wintypes.HDC,
+        ctypes.c_int,
+        ctypes.c_int,
+        wintypes.DWORD,
+    ]
+    gdi32.BitBlt.restype = wintypes.BOOL
+
+    gdi32.DeleteDC.argtypes = [wintypes.HDC]
+    gdi32.DeleteDC.restype = wintypes.BOOL
+
+    gdi32.DeleteObject.argtypes = [wintypes.HGDIOBJ]
+    gdi32.DeleteObject.restype = wintypes.BOOL
+else:
+    u32 = None
+    k32 = None
+    gdi32 = None
+
+    def WNDENUMPROC(fn):  # noqa: N802
+        return fn
 
 
 def get_process_name_by_pid(pid: int) -> str:
     """Retrieve process executable name given PID."""
     if pid <= 4:
         return "System"
+    if k32 is None:
+        return ""
     h_proc = k32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
     if not h_proc:
         return ""
@@ -115,8 +181,27 @@ def get_process_name_by_pid(pid: int) -> str:
         k32.CloseHandle(h_proc)
 
 
-def capture_window_screenshot(hwnd: int, rect: RECT, output_path: str) -> bool:
+def capture_window_screenshot(
+    hwnd: int,
+    rect: RECT,
+    output_path: str,
+    target_pid: int | None = None,
+    target_class: str = "",
+) -> bool:
     """Capture a screenshot of the specified window rectangle using ctypes GDI."""
+    # Invariant 52: Fail-safe process scoping and system window rejection
+    if target_pid is None or target_pid <= 0:
+        print("Invariant 52 Violation: target_pid must be provided and > 0 for window capture.", file=sys.stderr)
+        return False
+
+    if target_class in SYSTEM_CLASSES or target_class.startswith("HwndWrapper"):
+        print(f"Invariant 52 Violation: Denied window capture on system class '{target_class}'.", file=sys.stderr)
+        return False
+
+    if u32 is None or k32 is None or gdi32 is None:
+        print("Error: Win32 API is not available on this platform.", file=sys.stderr)
+        return False
+
     try:
         # Bring target window to absolute foreground before capturing
         fg_hwnd = u32.GetForegroundWindow()
@@ -124,11 +209,14 @@ def capture_window_screenshot(hwnd: int, rect: RECT, output_path: str) -> bool:
             fg_pid = wintypes.DWORD()
             fg_thread = u32.GetWindowThreadProcessId(fg_hwnd, ctypes.byref(fg_pid))
             cur_thread = k32.GetCurrentThreadId()
-            u32.AttachThreadInput(cur_thread, fg_thread, True)
-            u32.ShowWindow(hwnd, 3)  # SW_MAXIMIZE
-            u32.SetForegroundWindow(hwnd)
-            u32.BringWindowToTop(hwnd)
-            u32.AttachThreadInput(cur_thread, fg_thread, False)
+            attached = bool(u32.AttachThreadInput(cur_thread, fg_thread, True))
+            try:
+                u32.ShowWindow(hwnd, 3)  # SW_MAXIMIZE
+                u32.SetForegroundWindow(hwnd)
+                u32.BringWindowToTop(hwnd)
+            finally:
+                if attached:
+                    u32.AttachThreadInput(cur_thread, fg_thread, False)
             import time
             time.sleep(0.8)
             # Re-fetch window rect after bringing to front / maximize
@@ -187,6 +275,9 @@ def inspect_windows(
     include_system: bool = False,
 ) -> list[dict]:
     """Inspect all top-level windows on WinSta0\\Default."""
+    if u32 is None:
+        return []
+
     # Open desktop with read-only diagnostic privilege (INFRA-003)
     DESKTOP_READOBJECTS = 0x0001
     hdesk = u32.OpenDesktopW("Default", 0, False, DESKTOP_READOBJECTS)
@@ -200,12 +291,6 @@ def inspect_windows(
     results = []
     pid_name_cache = {}
 
-    SYSTEM_CLASSES = {
-        "Progman", "WorkerW", "Shell_TrayWnd", "Shell_SecondaryTrayWnd",
-        "IME", "MSCTFIME UI", "CiceroUIWndFrame", "Windows.UI.Core.CoreWindow",
-        "ApplicationFrameWindow", "SecHealth Window Class", "GDI+ Hook Window Class",
-    }
-
     def enum_callback(hwnd, lparam):
         is_vis = bool(u32.IsWindowVisible(hwnd))
         if visible_only and not is_vis:
@@ -216,7 +301,7 @@ def inspect_windows(
         u32.GetClassNameW(hwnd, cls_buf, 256)
         cls_name = cls_buf.value
 
-        if not include_system and cls_name in SYSTEM_CLASSES:
+        if not include_system and (cls_name in SYSTEM_CLASSES or cls_name.startswith("HwndWrapper")):
             return True
 
         # Process ID & Name
@@ -289,6 +374,10 @@ def inspect_windows(
 
 
 def main():
+    if sys.platform != "win32":
+        print("Error: inspect_desktop_windows.py is only supported on Windows.", file=sys.stderr)
+        sys.exit(1)
+
     parser = argparse.ArgumentParser(
         description="Authoritative Win32 Desktop Window Inspector for WinSta0\\Default."
     )
@@ -301,6 +390,9 @@ def main():
     parser.add_argument("--screenshot", "-s", help="Save a screenshot of the first matching window to this file path")
 
     args = parser.parse_args()
+
+    if args.screenshot and not (args.pid or args.process):
+        parser.error("--screenshot requires either --pid or --process to ensure targeted capture (Invariant 52).")
 
     vis_only = not args.include_hidden
     windows = inspect_windows(
@@ -319,7 +411,13 @@ def main():
             target["rect"]["right"],
             target["rect"]["bottom"],
         )
-        saved = capture_window_screenshot(target["hwnd_int"], r, args.screenshot)
+        saved = capture_window_screenshot(
+            target["hwnd_int"],
+            r,
+            args.screenshot,
+            target_pid=target["pid"],
+            target_class=target["class"],
+        )
         if saved:
             print(f"Screenshot saved to {args.screenshot}", file=sys.stderr)
         else:

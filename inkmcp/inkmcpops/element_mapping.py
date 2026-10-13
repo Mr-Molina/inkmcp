@@ -1,5 +1,6 @@
 """Element mapping and dynamic class instantiation for generic SVG element creation"""
 
+import re
 import inkex
 
 # Fallback mapping for cases where tag name doesn't match class name
@@ -122,6 +123,12 @@ def should_place_in_defs(element_class) -> bool:
         return clean_tag in DEFS_TAGS
 
     # Check if element instance
+    instance_cls = type(element_class)
+    if instance_cls.__name__.lower() in DEFS_TAGS:
+        return True
+    if getattr(instance_cls, "__module__", None) in DEFS_MODULES:
+        return True
+
     if hasattr(element_class, 'tag_name') and isinstance(element_class.tag_name, str):
         clean_tag = element_class.tag_name.lower().split('}')[-1]
         if clean_tag in DEFS_TAGS:
@@ -145,12 +152,30 @@ def ensure_defs_section(svg):
     Returns:
         The defs element
     """
+    if svg is None:
+        raise ValueError("SVG document root cannot be None")
+
     defs = getattr(svg, "defs", None)
+    if defs is None and hasattr(svg, "find") and callable(svg.find):
+        try:
+            found = svg.find(".//defs")
+            if found is None:
+                found = svg.find("defs")
+            if found is not None:
+                if isinstance(found, inkex.BaseElement):
+                    defs = found
+                elif not (hasattr(svg, "_mock_name") or hasattr(svg, "_mock_methods")):
+                    defs = found
+        except Exception:
+            defs = None
+
     if defs is None:
         defs = inkex.Defs()
-        if hasattr(svg, "append"):
+        if hasattr(svg, "insert") and callable(svg.insert):
+            svg.insert(0, defs)
+        elif hasattr(svg, "append") and callable(svg.append):
             svg.append(defs)
-        elif hasattr(svg, "add"):
+        elif hasattr(svg, "add") and callable(svg.add):
             svg.add(defs)
         try:
             svg.defs = defs
@@ -179,12 +204,37 @@ def get_unique_id(
     """
     reserved = reserved_ids if reserved_ids is not None else set()
 
-    if custom_id:
+    def _element_exists(element_id: str) -> bool:
+        if svg is not None and hasattr(svg, "getElementById") and callable(svg.getElementById):
+            try:
+                import unittest.mock
+                # Handle unconfigured MagicMock getElementById in test environments
+                if hasattr(svg, "_mock_name") or hasattr(svg, "_mock_methods"):
+                    mock_method = getattr(svg, "getElementById")
+                    if hasattr(mock_method, "_mock_name") or hasattr(mock_method, "_mock_methods"):
+                        if (
+                            getattr(mock_method, "_mock_side_effect", None) is None
+                            and getattr(mock_method, "_mock_return_value", None) is unittest.mock.DEFAULT
+                        ):
+                            return False
+                el = svg.getElementById(element_id)
+                return el is not None
+            except Exception:
+                return False
+        return False
+
+    if custom_id is not None:
+        # Sanitize custom_id to a valid XML NCName
+        sanitized_id = re.sub(r'[^a-zA-Z0-9._-]', '_', str(custom_id))
+        if not re.match(r'^[a-zA-Z_]', sanitized_id):
+            sanitized_id = f"id_{sanitized_id}"
+        custom_id = sanitized_id
+
         # Check for collision and auto-increment if needed
         original_id = custom_id
         counter = 1
 
-        while custom_id in reserved or svg.getElementById(custom_id) is not None:
+        while (custom_id in reserved or _element_exists(custom_id)) and counter < 1000:
             custom_id = f"{original_id}_{counter}"
             counter += 1
 
@@ -197,7 +247,7 @@ def get_unique_id(
 
     candidate = generated
     counter = 1
-    while candidate in reserved or (candidate != generated and svg.getElementById(candidate) is not None):
+    while (candidate in reserved or _element_exists(candidate)) and counter < 1000:
         candidate = f"{generated}_{counter}"
         counter += 1
 

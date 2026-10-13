@@ -96,7 +96,8 @@ def _line_cores(L: np.ndarray, lids: np.ndarray, nl: int, pct: float) -> np.ndar
 
 def _components(lab: np.ndarray, valid: np.ndarray, delta: float) -> Tuple[int, np.ndarray]:
     h, w = valid.shape
-    idx = np.arange(h * w).reshape(h, w)
+    dt = np.int32 if h * w < 2147483647 else np.int64
+    idx = np.arange(h * w, dtype=dt).reshape(h, w)
     rows, cols = [], []
     # horizontal links
     d = np.sqrt(((lab[:, 1:] - lab[:, :-1]) ** 2).sum(-1))
@@ -131,13 +132,15 @@ def _region_medians(values: np.ndarray, ids: np.ndarray, n: int) -> np.ndarray:
 def flatten_gradients(rgba: np.ndarray, cfg: FlattenConfig | None = None) -> np.ndarray:
     """Return an RGBA image where every region is a single flat colour."""
     cfg = cfg or FlattenConfig()
+    h, w = rgba.shape[:2]
+    if h * w > 16_000_000:
+        raise ValueError(f"Image too large ({w}x{h} = {h * w} pixels, max 16,000,000).")
     rgb = rgba[:, :, :3].copy()
     alpha = rgba[:, :, 3]
     opaque = alpha >= cfg.alpha_threshold
     if cfg.denoise:
         rgb = cv2.bilateralFilter(rgb, d=5, sigmaColor=18, sigmaSpace=3)
     lab = _to_lab(rgb)
-    h, w = opaque.shape
 
     if cfg.keep_thin_lines:
         dark = _thin_line_mask(lab, opaque, cfg)
@@ -221,14 +224,18 @@ def flatten_gradients(rgba: np.ndarray, cfg: FlattenConfig | None = None) -> np.
     return out
 
 
+def _adjacent_pairs(rid: np.ndarray) -> np.ndarray:
+    a = np.concatenate([rid[:, :-1].ravel(), rid[:-1, :].ravel()])
+    b = np.concatenate([rid[:, 1:].ravel(), rid[1:, :].ravel()])
+    sel = (a >= 0) & (b >= 0) & (a != b)
+    if not sel.any():
+        return np.zeros((0, 2), np.int64)
+    return np.unique(np.stack([np.minimum(a[sel], b[sel]), np.maximum(a[sel], b[sel])], 1), axis=0)
+
+
 def _merge_similar(med: np.ndarray, rid: np.ndarray, keep: np.ndarray, lab: np.ndarray, delta: float):
     """Union adjacent regions whose median colours are within ``delta``."""
-    a_h, b_h = rid[:, :-1], rid[:, 1:]
-    a_v, b_v = rid[:-1, :], rid[1:, :]
-    a = np.concatenate([a_h.ravel(), a_v.ravel()])
-    b = np.concatenate([b_h.ravel(), b_v.ravel()])
-    sel = (a >= 0) & (b >= 0) & (a != b)
-    pairs = np.unique(np.stack([np.minimum(a[sel], b[sel]), np.maximum(a[sel], b[sel])], 1), axis=0)
+    pairs = _adjacent_pairs(rid)
     if len(pairs) == 0:
         return med, rid
     d = np.sqrt(((med[pairs[:, 0]] - med[pairs[:, 1]]) ** 2).sum(-1))
@@ -242,15 +249,6 @@ def _merge_similar(med: np.ndarray, rid: np.ndarray, keep: np.ndarray, lab: np.n
     new[rid >= 0] = grp[rid[rid >= 0]]
     med2 = _region_medians(lab[keep], new[keep], n2)
     return med2, new
-
-
-def _adjacent_pairs(rid: np.ndarray) -> np.ndarray:
-    a = np.concatenate([rid[:, :-1].ravel(), rid[:-1, :].ravel()])
-    b = np.concatenate([rid[:, 1:].ravel(), rid[1:, :].ravel()])
-    sel = (a >= 0) & (b >= 0) & (a != b)
-    if not sel.any():
-        return np.zeros((0, 2), np.int64)
-    return np.unique(np.stack([np.minimum(a[sel], b[sel]), np.maximum(a[sel], b[sel])], 1), axis=0)
 
 
 def _drop_blend_strips(med: np.ndarray, rid: np.ndarray, is_line: np.ndarray) -> np.ndarray:

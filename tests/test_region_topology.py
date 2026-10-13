@@ -1,4 +1,3 @@
-import pytest
 import numpy as np
 import cv2
 from inkmcp.vectorizer.region_topology import RegionTopologyAnalyzer

@@ -22,8 +22,14 @@ class RegionTopologyAnalyzer:
         min_area: int = 25,
         close_gaps_kernel: int = 3,
     ) -> List[RegionTarget]:
+        if binary_mask.ndim < 2:
+            return []
         h, w = binary_mask.shape[:2]
+        if h == 0 or w == 0:
+            return []
         processed = binary_mask.copy()
+        if processed.ndim == 3:
+            processed = processed[:, :, 0]
 
         if close_gaps_kernel > 1:
             kernel = cv2.getStructuringElement(
@@ -45,7 +51,8 @@ class RegionTopologyAnalyzer:
                 continue
 
             region_mask = (labels == lbl).astype(np.uint8) * 255
-            dist = cv2.distanceTransform(region_mask, cv2.DIST_L2, 5)
+            padded_mask = np.pad(region_mask, pad_width=1, mode="constant", constant_values=0)
+            dist = cv2.distanceTransform(padded_mask, cv2.DIST_L2, 5)[1:-1, 1:-1]
             _, _, _, max_loc = cv2.minMaxLoc(dist)
 
             best_x, best_y = max_loc

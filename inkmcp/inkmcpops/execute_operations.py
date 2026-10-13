@@ -21,6 +21,7 @@ from .common import create_success_response, create_error_response
 _DANGEROUS_ATTRIBUTES = frozenset({
     '__builtins__', '__import__', '__subclasses__', '__globals__',
     '__class__', '__mro__', '__bases__', '__code__', '__func__',
+    '__dict__', '__closure__', '__annotations__', '__self__',
     'command', 'os', 'sys', 'popen', 'system', 'call', 'subprocess',
     'getroottree', 'write', 'tofile'
 })
@@ -214,6 +215,8 @@ def execute_code(extension_instance, svg, attributes: Dict[str, Any]) -> Dict[st
                         exec(code, execution_globals, execution_locals)
                 except Exception as e:
                     exec_exception.append((e, traceback.format_exc()))
+                except SystemExit:
+                    raise
                 except BaseException:
                     pass
             
@@ -225,17 +228,18 @@ def execute_code(extension_instance, svg, attributes: Dict[str, Any]) -> Dict[st
             if thread.is_alive():
                 try:
                     import ctypes
-                    ctypes.pythonapi.PyThreadState_SetAsyncExc(
-                        ctypes.c_ulong(thread.ident),
-                        ctypes.py_object(SystemExit),
-                    )
+                    if thread.ident is not None:
+                        ctypes.pythonapi.PyThreadState_SetAsyncExc(
+                            ctypes.c_ulong(thread.ident),
+                            ctypes.py_object(SystemExit),
+                        )
                 except Exception:
                     pass
                 result_data["errors"] = f"Execution error: Timeout after {timeout_seconds} seconds"
                 result_data["execution_successful"] = False
             elif exec_exception:
-                e, tb = exec_exception[0]
-                result_data["errors"] = f"Execution error: {str(e)}\n\nTraceback:\n{tb}"
+                exc_val, tb = exec_exception[0]
+                result_data["errors"] = f"Execution error: {type(exc_val).__name__}: {str(exc_val)}\n\nTraceback:\n{tb}"
                 result_data["execution_successful"] = False
             else:
                 result_data["execution_successful"] = True
@@ -273,7 +277,7 @@ def execute_code(extension_instance, svg, attributes: Dict[str, Any]) -> Dict[st
                 result_data["elements_created"] = [f"{elements_after - elements_before} new elements added"]
 
             # Get element counts by type
-            element_counts = {}
+            element_counts: Dict[str, int] = {}
             for element in svg.iter():
                 tag = element.tag.split('}')[-1] if isinstance(element.tag, str) and '}' in element.tag else str(element.tag)
                 element_counts[tag] = element_counts.get(tag, 0) + 1

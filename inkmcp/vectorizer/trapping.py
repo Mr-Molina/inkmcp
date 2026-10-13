@@ -1,10 +1,10 @@
 """Automated choke and spread trapping engine for multi-layer vinyl and screen printing."""
 
 import logging
-import re
-from typing import List, Optional, Tuple
+import math
+from typing import List
 
-from shapely.geometry import MultiPolygon, Polygon
+from shapely.geometry import Polygon
 from shapely.ops import unary_union
 from shapely.validation import make_valid
 
@@ -45,7 +45,12 @@ def _polygon_to_path_d(geom) -> str:
         polys = list(geom.geoms)
     else:
         # If geometry collection or unexpected type
-        polys = [g for g in getattr(geom, "geoms", []) if g.geom_type == "Polygon"]
+        polys = []
+        for g in getattr(geom, "geoms", []):
+            if g.geom_type == "Polygon":
+                polys.append(g)
+            elif g.geom_type == "MultiPolygon":
+                polys.extend(list(g.geoms))
         if not polys:
             return ""
 
@@ -115,7 +120,9 @@ def apply_choke_spread_trapping(
     Returns:
         New List of LayerGroup instances with trapped path data.
     """
-    if not layers or trap_distance <= 0:
+    if trap_distance < 0:
+        raise ValueError(f"trap_distance must be non-negative, got {trap_distance}")
+    if not layers or math.isnan(trap_distance) or math.isinf(trap_distance) or trap_distance <= 0:
         return layers
 
     # 1. Parse all paths into Shapely geometries

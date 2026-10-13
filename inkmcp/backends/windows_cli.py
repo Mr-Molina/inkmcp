@@ -12,17 +12,17 @@ import time
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-try:
-    import msvcrt
-except ImportError:
-    msvcrt = None
-
 from inkmcp.backends.base import InkscapeBackend
 from inkmcp.platform_utils import (
     find_inkscape_executable,
     get_operating_system,
     is_extension_installed,
 )
+
+try:
+    import msvcrt
+except ImportError:
+    msvcrt = None  # type: ignore[assignment]
 
 logger = logging.getLogger("InkscapeMCP.Backend.WindowsCLI")
 
@@ -83,11 +83,16 @@ class _ActionLock:
                     return True
                 except (OSError, FileExistsError):
                     try:
-                        mtime = os.path.getmtime(self.lock_path)
-                        if (time.time() - mtime) > (self.timeout + 10.0):
+                        stat_res = os.stat(self.lock_path)
+                        if (time.time() - stat_res.st_mtime) > (self.timeout + 10.0):
+                            stale_path = f"{self.lock_path}.stale.{os.getpid()}.{time.time_ns()}"
                             try:
-                                os.remove(self.lock_path)
-                            except (FileNotFoundError, PermissionError, OSError):
+                                os.replace(self.lock_path, stale_path)
+                                try:
+                                    os.remove(stale_path)
+                                except OSError:
+                                    pass
+                            except OSError:
                                 pass
                     except OSError:
                         pass
@@ -210,13 +215,48 @@ class WindowsCliBackend(InkscapeBackend):
                         os.close(resp_fd)
                         created_temp_response = True
 
+                    # Validate response_file containment inside temp_dir BEFORE execution (SEC-033)
+                    temp_dir_path = Path(tempfile.gettempdir()).resolve()
+                    try:
+                        resp_path = Path(response_file).resolve()
+                        is_safe = resp_path.is_relative_to(temp_dir_path) and resp_path != temp_dir_path
+                    except (ValueError, TypeError, Exception):
+                        is_safe = False
+
+                    if not is_safe:
+                        logger.error("Response file path outside temp directory: %s", response_file)
+                        return {
+                            "status": "error",
+                            "data": {
+                                "error": f"Response file error: Path outside temp directory: {response_file}"
+                            },
+                        }
+
                     payload = dict(operation_data)
                     payload["response_file"] = response_file
 
                     # 2. Write parameter file (canonical path expected by noprefs action)
                     params_file = os.path.join(tempfile.gettempdir(), "mcp_params.json")
-                    with open(params_file, "w", encoding="utf-8") as pf:
-                        json.dump(payload, pf)
+                    if os.path.islink(params_file):
+                        try:
+                            os.unlink(params_file)
+                        except OSError:
+                            pass
+
+                    flags = os.O_CREAT | os.O_WRONLY | os.O_TRUNC
+                    if hasattr(os, "O_NOFOLLOW"):
+                        flags |= os.O_NOFOLLOW
+
+                    p_fd = os.open(params_file, flags, 0o600)
+                    try:
+                        with open(p_fd, "w", encoding="utf-8") as pf:
+                            json.dump(payload, pf)
+                    except Exception:
+                        try:
+                            os.close(p_fd)
+                        except OSError:
+                            pass
+                        raise
 
                     # 3. Invoke Inkscape action via console binary
                     # -q / --active-window directs action to existing running window
@@ -250,27 +290,8 @@ class WindowsCliBackend(InkscapeBackend):
                             },
                         }
 
-                    # 4. Validate response_file realpath resides strictly inside tempfile.gettempdir()
-                    temp_dir = os.path.realpath(tempfile.gettempdir())
-                    resp_real = os.path.realpath(response_file)
-                    try:
-                        is_safe = (
-                            os.path.commonpath([temp_dir, resp_real]) == temp_dir
-                            and resp_real != temp_dir
-                        )
-                    except (ValueError, TypeError):
-                        is_safe = False
-
-                    if not is_safe:
-                        logger.error("Response file path outside temp directory: %s", response_file)
-                        return {
-                            "status": "error",
-                            "data": {
-                                "error": f"Response file error: Path outside temp directory: {response_file}"
-                            },
-                        }
-
-                    # 5. Read response from response file
+                    # 4. Read response from response file
+                    resp_real = str(Path(response_file).resolve())
                     if not os.path.exists(resp_real) or os.path.getsize(resp_real) == 0:
                         return {
                             "status": "error",
@@ -287,9 +308,12 @@ class WindowsCliBackend(InkscapeBackend):
                             os.remove(response_file)
                         except OSError:
                             pass
-                    if params_file and os.path.exists(params_file):
+                    if params_file and (os.path.exists(params_file) or os.path.islink(params_file)):
                         try:
-                            os.remove(params_file)
+                            if os.path.islink(params_file):
+                                os.unlink(params_file)
+                            else:
+                                os.remove(params_file)
                         except OSError:
                             pass
 

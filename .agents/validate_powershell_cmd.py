@@ -31,10 +31,16 @@ def validate_command(cmd: str) -> Tuple[bool, List[str]]:
                 "Invariant 53 Violation: Multi-line inline Python (python -c with newlines) is forbidden. "
                 "Write the code to a .py file via file tools and execute with 'python script.py'."
             )
-        # Disallow multiple statements separated by ';' inside python -c
-        if ";" in py_arg and len(py_arg) > 40:
+        # Disallow multiple statements separated by ';' inside python -c regardless of command length
+        if ";" in py_arg:
             errors.append(
                 "Invariant 53 Violation: Complex multi-statement inline Python (python -c with ';') is forbidden. "
+                "Write to a .py file instead."
+            )
+        # Disallow f-strings inside python -c
+        if re.search(r'\bf["\']', py_arg, re.IGNORECASE):
+            errors.append(
+                "Invariant 53 Violation: Inline Python containing f-strings is forbidden. "
                 "Write to a .py file instead."
             )
         # Disallow dictionaries or nested quoting
@@ -44,25 +50,15 @@ def validate_command(cmd: str) -> Tuple[bool, List[str]]:
                 "Write to a .py file instead."
             )
 
-    # 2. Check for invalid PowerShell quote escaping (\" inside double quotes)
-    # In PowerShell, \" is NOT an escape sequence for double quote; it is literal \ followed by string end.
-    if re.search(r'\\"', trimmed):
-        # Check if it appears inside a double-quoted region
-        # Common anti-pattern: -c "print(\"hello\")" or "echo \"value\""
-        errors.append(
-            "PowerShell Quoting Error: Detected '\"' escape sequence. "
-            "PowerShell does NOT use backslash to escape double quotes! "
-            "Use doubled double quotes '\"\"' or backtick-quote '`\"' inside double quotes, "
-            "or use single quotes '...' for literal strings."
-        )
-
-    # 3. Check for balanced quotes
+    # 2. State-machine loop to check quote balance, backslash-quote, and variable traps
     # Count quotes taking into account PowerShell escaping:
     # Inside single quotes: '' is an escaped single quote.
     # Inside double quotes: "" and `" are escaped double quotes.
     in_single = False
     in_double = False
     escaped_by_backtick = False
+    has_backslash_quote = False
+    has_dollar_digits_in_double = False
     i = 0
     while i < len(trimmed):
         char = trimmed[i]
@@ -70,8 +66,16 @@ def validate_command(cmd: str) -> Tuple[bool, List[str]]:
         if not in_single and not in_double:
             if char == "'":
                 in_single = True
+                i += 1
+                continue
             elif char == '"':
                 in_double = True
+                i += 1
+                continue
+            elif char == '\\' and i + 1 < len(trimmed) and trimmed[i + 1] == '"':
+                has_backslash_quote = True
+                i += 2
+                continue
             i += 1
             continue
 
@@ -95,6 +99,14 @@ def validate_command(cmd: str) -> Tuple[bool, List[str]]:
                 escaped_by_backtick = True
                 i += 1
                 continue
+            if char == '\\' and i + 1 < len(trimmed) and trimmed[i + 1] == '"':
+                has_backslash_quote = True
+                i += 2
+                continue
+            if char == '$' and i + 1 < len(trimmed) and trimmed[i + 1].isdigit():
+                has_dollar_digits_in_double = True
+                i += 1
+                continue
             if char == '"':
                 # Check for doubled double quote ""
                 if i + 1 < len(trimmed) and trimmed[i + 1] == '"':
@@ -110,10 +122,15 @@ def validate_command(cmd: str) -> Tuple[bool, List[str]]:
     if in_double:
         errors.append("Syntax Error: Unclosed double quote (\") detected in command.")
 
-    # 4. Check for unescaped currency/regex dollar signs inside double quotes
-    # Match patterns like "$100" or "$#" or "$/" inside double quotes
-    # (PowerShell treats $ followed by numbers as special/empty variables)
-    if re.search(r'"[^"]*\$[0-9]+[^"]*"', trimmed):
+    if has_backslash_quote:
+        errors.append(
+            "PowerShell Quoting Error: Detected '\"' escape sequence. "
+            "PowerShell does NOT use backslash to escape double quotes! "
+            "Use doubled double quotes '\"\"' or backtick-quote '`\"' inside double quotes, "
+            "or use single quotes '...' for literal strings."
+        )
+
+    if has_dollar_digits_in_double:
         errors.append(
             "PowerShell Variable Trap: Detected literal '$<digits>' inside double quotes. "
             "PowerShell will attempt variable interpolation. Use single quotes '...' or escape with '`$'."
@@ -124,7 +141,7 @@ def validate_command(cmd: str) -> Tuple[bool, List[str]]:
 def main():
     if len(sys.argv) < 2:
         print("Usage: python validate_powershell_cmd.py \"<command-string>\"")
-        sys.exit(0)
+        sys.exit(2)
 
     command = " ".join(sys.argv[1:])
     valid, errors = validate_command(command)

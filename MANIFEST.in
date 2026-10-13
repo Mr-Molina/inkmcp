@@ -1,6 +1,7 @@
 include LICENSE
 include README.md
 include pyproject.toml
+include inkmcp/requirements.txt
 include inkscape_mcp.py
 include inkscape_mcp.inx
 recursive-include inkmcp *.py

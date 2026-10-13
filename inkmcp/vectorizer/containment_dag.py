@@ -1,7 +1,7 @@
 """Topological containment DAG and deterministic z-stacking engine."""
 
 import logging
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Tuple
 
 import networkx as nx
 from shapely.geometry import Polygon
@@ -74,7 +74,10 @@ def build_containment_dag(polygons: List[Tuple[str, Polygon]]) -> nx.DiGraph:
         cycles = list(nx.simple_cycles(raw_dag))
         for cycle in cycles:
             for u, v in zip(cycle, cycle[1:] + [cycle[0]]):
-                if raw_dag.nodes[u]["area"] <= raw_dag.nodes[v]["area"]:
+                if (
+                    raw_dag.has_edge(u, v)
+                    and raw_dag.nodes[u]["area"] <= raw_dag.nodes[v]["area"]
+                ):
                     raw_dag.remove_edge(u, v)
 
     # Apply transitive reduction to keep only direct containment relationships
@@ -104,23 +107,11 @@ def resolve_stacking_order(dag: nx.DiGraph) -> List[str]:
         return []
 
     # Calculate containment depth for each node (longest path from any root)
-    depths: Dict[str, int] = {}
-    roots = [n for n in dag.nodes if dag.in_degree(n) == 0]
+    depths: Dict[str, int] = {node: 0 for node in dag.nodes}
 
-    # Initialize all to 0
-    for node in dag.nodes:
-        depths[node] = 0
-
-    # For each root, compute DAG longest paths
-    for root in roots:
-        for target in dag.nodes:
-            if target != root and nx.has_path(dag, root, target):
-                path_len = len(nx.dag_longest_path(dag.subgraph(nx.descendants(dag, root) | {root}))) - 1
-                # More direct: max length of all simple paths from root to target
-                all_paths = list(nx.all_simple_paths(dag, root, target))
-                if all_paths:
-                    max_len = max(len(p) - 1 for p in all_paths)
-                    depths[target] = max(depths[target], max_len)
+    for u in nx.topological_sort(dag):
+        for v in dag.successors(u):
+            depths[v] = max(depths[v], depths[u] + 1)
 
     # Sort nodes by: (depth ascending, area descending, shape_id)
     sorted_nodes = sorted(

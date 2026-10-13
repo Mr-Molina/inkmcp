@@ -4,11 +4,14 @@ Inkscape Extension for dynamic SVG element creation
 Handles any SVG element through dynamic class instantiation
 """
 
-import inkex
+from __future__ import annotations
+
 import json
+import logging
 import os
 import tempfile
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
+import inkex
 from inkmcp.inkmcpops.element_mapping import (
     get_element_class,
     should_place_in_defs,
@@ -175,8 +178,10 @@ class ElementCreator(inkex.EffectExtension):
             height = svg.get("height", "unknown")
 
             # Count elements by type
-            element_counts = {}
+            element_counts: Dict[str, int] = {}
             for elem in svg.iter():
+                if not isinstance(elem.tag, str):
+                    continue
                 tag = elem.tag.split("}")[-1] if "}" in elem.tag else elem.tag
                 element_counts[tag] = element_counts.get(tag, 0) + 1
 
@@ -219,8 +224,14 @@ class ElementCreator(inkex.EffectExtension):
                 "data": {"error": f"Failed to get element info: {str(e)}"},
             }
 
-    def write_response(self, response_data: Dict[str, Any], response_file_path: str):
+    def write_response(
+        self, response_data: Dict[str, Any], response_file_path: Optional[str] = None
+    ):
         """Write response to response file (like original system)"""
+        if not response_file_path:
+            logging.error("Response: %s", response_data)
+            return
+
         try:
             temp_dir = os.path.realpath(tempfile.gettempdir())
             real_path = os.path.realpath(response_file_path)
@@ -228,13 +239,13 @@ class ElementCreator(inkex.EffectExtension):
                 os.path.commonpath([temp_dir, real_path]) != temp_dir
                 or real_path == temp_dir
             ):
+                logging.error("Response file outside temp directory: %s", response_file_path)
                 return
 
-            with open(response_file_path, "w") as f:
+            with open(response_file_path, "w", encoding="utf-8") as f:
                 json.dump(response_data, f)
         except Exception as e:
             # Silent failure - avoid any output that could interfere with Inkscape
-            import logging
             logging.warning("Failed to write response file: %s", e)
 
     def effect(self):
@@ -249,12 +260,14 @@ class ElementCreator(inkex.EffectExtension):
         has_custom_args = any(arg.startswith("--") for arg in sys.argv[1:])
         if not params_file:
             if has_custom_args:
+                error_msg = "No parameters file provided for standalone effect"
+                logging.error(error_msg)
                 self.write_response(
                     {
                         "status": "error",
-                        "data": {"error": "No parameters file provided for standalone effect"},
+                        "data": {"error": error_msg},
                     },
-                    os.path.join(tempfile.gettempdir(), "inkmcp_error_response.json"),
+                    None,
                 )
                 return
             params_file = os.path.join(tempfile.gettempdir(), "mcp_params.json")
@@ -271,24 +284,28 @@ class ElementCreator(inkex.EffectExtension):
             is_safe = False
 
         if not is_safe:
+            error_msg = f"Params file outside temp directory: {params_file}"
+            logging.error(error_msg)
             self.write_response(
                 {
                     "status": "error",
-                    "data": {"error": f"Params file outside temp directory: {params_file}"},
+                    "data": {"error": error_msg},
                 },
-                os.path.join(tempfile.gettempdir(), "inkmcp_error_response.json"),
+                None,
             )
             return
 
         try:
             if not os.path.exists(params_real):
+                error_msg = "No parameters file found"
+                logging.error(error_msg)
                 response = {
                     "status": "error",
-                    "data": {"error": "No parameters file found"},
+                    "data": {"error": error_msg},
                 }
                 self.write_response(
                     response,
-                    os.path.join(tempfile.gettempdir(), "inkmcp_error_response.json"),
+                    None,
                 )
                 return
 
@@ -368,8 +385,9 @@ class ElementCreator(inkex.EffectExtension):
                 response_file = element_data.get("response_file")
                 if response_file:
                     self.write_response(error_response, response_file)
+                else:
+                    logging.error("Extension execution failed: %s", e)
             except Exception as inner_e:
-                import logging
                 logging.warning("Failed to write error response: %s", inner_e)
         finally:
             if params_file and is_safe:

@@ -25,6 +25,11 @@ class OutlineGenerator:
         if outline_path:
             if Path(outline_path).is_file():
                 img = cv2.imread(str(outline_path), cv2.IMREAD_GRAYSCALE)
+                if img is None:
+                    try:
+                        img = cv2.imdecode(np.fromfile(str(outline_path), dtype=np.uint8), cv2.IMREAD_GRAYSCALE)
+                    except Exception:
+                        img = None
                 if img is not None:
                     if img.std() > 5.0:
                         _, binarized = cv2.threshold(img, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
@@ -35,9 +40,17 @@ class OutlineGenerator:
             else:
                 logger.warning("Specified outline_path does not exist: %s; falling back to edge detection", outline_path)
 
+        if not Path(image_path).is_file():
+            raise FileNotFoundError(f"Source image not found: {image_path}")
+
         src = cv2.imread(str(image_path), cv2.IMREAD_COLOR)
         if src is None:
-            raise FileNotFoundError(f"Source image not found: {image_path}")
+            try:
+                src = cv2.imdecode(np.fromfile(str(image_path), dtype=np.uint8), cv2.IMREAD_COLOR)
+            except Exception:
+                src = None
+        if src is None:
+            raise ValueError(f"Could not decode image at {image_path}")
 
         gray = cv2.cvtColor(src, cv2.COLOR_BGR2GRAY)
         filtered = cv2.bilateralFilter(gray, 7, 75, 75)

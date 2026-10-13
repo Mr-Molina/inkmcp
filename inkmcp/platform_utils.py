@@ -4,6 +4,8 @@ Provides cross-platform resolution of Inkscape executables, extension directorie
 and process states.
 """
 
+import csv
+import io
 import logging
 import os
 import shutil
@@ -116,6 +118,9 @@ def find_inkscape_executable() -> Optional[Path]:
         # 5. Fallback to inkscape in PATH
         general_which = shutil.which("inkscape")
         if general_which:
+            com_candidate = Path(general_which).with_name("inkscape.com")
+            if com_candidate.is_file():
+                return com_candidate
             return Path(general_which)
 
         return None
@@ -171,12 +176,16 @@ def get_inkscape_extensions_dir() -> Path:
     return Path.home() / ".config" / "inkscape" / "extensions"
 
 
-def is_extension_installed(ext_dir: Optional[Path] = None) -> bool:
+def is_extension_installed(ext_dir: Optional[Path] = None, require_package: bool = False) -> bool:
     """Check if inkmcp extension files exist in target extensions directory."""
     target_dir = ext_dir if ext_dir is not None else get_inkscape_extensions_dir()
     inx_file = target_dir / "inkscape_mcp.inx"
     py_file = target_dir / "inkscape_mcp.py"
-    return inx_file.is_file() and py_file.is_file()
+    if not (inx_file.is_file() and py_file.is_file()):
+        return False
+    if require_package:
+        return (target_dir / "inkmcp").is_dir()
+    return True
 
 
 def is_inkscape_process_running() -> bool:
@@ -186,9 +195,21 @@ def is_inkscape_process_running() -> bool:
         if os_name == "windows":
             cmd = ["tasklist", "/FI", "IMAGENAME eq inkscape*", "/FO", "CSV", "/NH"]
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=5, creationflags=0x08000000)
-            return "inkscape" in result.stdout.lower()
+            stdout = (result.stdout or "").strip()
+            if not stdout:
+                return False
+            reader = csv.reader(io.StringIO(stdout))
+            for row in reader:
+                if row:
+                    first_col = row[0].strip().strip('"').lower()
+                    if first_col in ("inkscape.exe", "inkscape.com"):
+                        return True
+                    parts = first_col.split()
+                    if parts and parts[0] in ("inkscape.exe", "inkscape.com"):
+                        return True
+            return False
         else:
-            cmd = ["pgrep", "-f", "inkscape"]
+            cmd = ["pgrep", "-x", "inkscape"]
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
             return result.returncode == 0
     except Exception as e:

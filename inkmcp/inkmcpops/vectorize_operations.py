@@ -167,7 +167,11 @@ def vectorize_image_operation(
 
             raw_colors = params.get("num_colors")
             try:
-                requested = int(raw_colors) if raw_colors not in (None, "", "auto") else 0
+                requested = (
+                    int(raw_colors if raw_colors is not None else 8)
+                    if raw_colors not in (None, "", "auto")
+                    else 0
+                )
             except (ValueError, TypeError):
                 requested = 0
             raw_flatten = params.get("flatten")
@@ -244,6 +248,7 @@ def vectorize_image_operation(
         img_to_vectorize = getattr(preprocessed, "processed_image", None) or getattr(
             preprocessed, "image", None
         )
+        target_img = img_to_vectorize if img_to_vectorize is not None else str(image_path_obj)
         filter_speckle_int = max(0, int(round(filter_speckle)))
         scaled_segment_length = segment_length * (
             float(subpixel_scale) if subpixel_scale > 1 else 1.0
@@ -251,7 +256,7 @@ def vectorize_image_operation(
         scale_factor = (1.0 / subpixel_scale) if subpixel_scale > 1 else 1.0
 
         raw_vector = core.vectorize(
-            img_to_vectorize,
+            target_img,
             colormode=colormode,
             hierarchical=hierarchical,
             filter_speckle=filter_speckle_int,
@@ -325,6 +330,7 @@ def _finish(
 ) -> Dict[str, Any]:
     """Write the SVG, optionally inject layers into Inkscape, and build the response."""
     # 7. Write to output file (or fallback temporary file)
+    temp_svg_path: Optional[str] = None
     if output_path:
         resolved_output_path = os.path.abspath(output_path)
         parent_dir = os.path.dirname(resolved_output_path)
@@ -335,8 +341,16 @@ def _finish(
         os.close(temp_fd)
         resolved_output_path = os.path.abspath(temp_svg_path)
 
-    with open(resolved_output_path, "w", encoding="utf-8") as f:
-        f.write(svg_content)
+    try:
+        with open(resolved_output_path, "w", encoding="utf-8") as f:
+            f.write(svg_content)
+    except Exception as e:
+        if temp_svg_path and os.path.exists(temp_svg_path):
+            try:
+                os.remove(temp_svg_path)
+            except OSError:
+                pass
+        return create_error_response(f"Failed to write SVG: {str(e)}")
 
     # 8. Live Inkscape injection or graceful fallback
     injected = False

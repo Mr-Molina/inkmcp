@@ -1,8 +1,6 @@
 """Unit tests for inkmcp.vectorizer.primitives."""
 
 import math
-import pytest
-from shapely.geometry import Polygon
 
 from inkmcp.vectorizer.primitives import (
     detect_and_refit_rectangles,

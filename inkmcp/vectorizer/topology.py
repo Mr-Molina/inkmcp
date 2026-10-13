@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 from shapely.geometry import Polygon
 from shapely.geometry.base import BaseGeometry
+from shapely.geometry.polygon import orient
 from shapely.ops import unary_union
 from shapely.validation import make_valid
 
@@ -50,7 +51,7 @@ def _linear_ring_to_svg(coords) -> str:
         return ""
     if len(pts) > 1 and pts[0] == pts[-1]:
         pts = pts[:-1]
-    if not pts:
+    if len(pts) < 3:
         return ""
     start = f"M {_format_coord(pts[0][0])} {_format_coord(pts[0][1])}"
     segments = [f"L {_format_coord(x)} {_format_coord(y)}" for x, y in pts[1:]]
@@ -165,6 +166,7 @@ class TopologyEngine:
         for poly in polys:
             if poly.is_empty or poly.area <= 0:
                 continue
+            poly = orient(poly, sign=1.0)
             ext = _linear_ring_to_svg(poly.exterior.coords)
             if ext:
                 subpaths.append(ext)
@@ -381,7 +383,14 @@ class TopologyEngine:
                 higher_geoms = [group_items[j]["geom"] for j in range(i + 1, n)]
                 if higher_geoms:
                     mask = unary_union(higher_geoms)
-                    subtracted = current_geom.difference(mask)
+                    valid_curr = make_valid(current_geom)
+                    try:
+                        subtracted = valid_curr.difference(mask)
+                    except Exception:
+                        try:
+                            subtracted = valid_curr.buffer(0).difference(mask.buffer(0))
+                        except Exception:
+                            subtracted = valid_curr
                     subtracted = _extract_polygonal_geometry(make_valid(subtracted))
                     processed_geoms[i] = subtracted
                 else:

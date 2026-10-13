@@ -1,8 +1,5 @@
 """Unit tests for inkmcp.vectorizer.cam_planner."""
 
-import math
-import pytest
-from shapely.geometry import box
 
 from inkmcp.vectorizer.core import PathRecord
 from inkmcp.vectorizer.cam_planner import (

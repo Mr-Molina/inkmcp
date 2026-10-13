@@ -23,7 +23,13 @@ $VenvDir = Join-Path $ScriptDir "venv"
 if (-not (Test-Path $VenvDir)) {
     [Console]::Error.WriteLine("Creating Python virtual environment...")
     & python -m venv "$VenvDir"
+    if ($LASTEXITCODE -ne 0) {
+        exit $LASTEXITCODE
+    }
     & "$VenvDir\Scripts\python.exe" -m pip install -r "$ScriptDir\requirements.txt" | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        exit $LASTEXITCODE
+    }
 }
 
 $PythonExe = Join-Path $VenvDir "Scripts\python.exe"

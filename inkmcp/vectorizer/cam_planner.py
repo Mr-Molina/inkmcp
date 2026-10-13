@@ -32,7 +32,14 @@ def _get_path_endpoints(path_data: str) -> Tuple[Tuple[float, float], Tuple[floa
 
     start_pt = (float(nums[0]), float(nums[1]))
     # For closed paths ending with Z/z, end point equals start point
-    if path_data.strip().endswith(("Z", "z")):
+    stripped = path_data.strip()
+    if stripped.endswith(("Z", "z")):
+        subpaths = [s for s in re.split(r"(?=[Mm])", stripped) if s.strip()]
+        if len(subpaths) > 1:
+            first_nums = re.findall(r"[-+]?(?:\d*\.\d+|\d+)(?:[eE][-+]?\d+)?", subpaths[0])
+            last_nums = re.findall(r"[-+]?(?:\d*\.\d+|\d+)(?:[eE][-+]?\d+)?", subpaths[-1])
+            if len(first_nums) >= 2 and len(last_nums) >= 2:
+                return (float(first_nums[0]), float(first_nums[1])), (float(last_nums[0]), float(last_nums[1]))
         return start_pt, start_pt
 
     end_pt = (float(nums[-2]), float(nums[-1]))
@@ -47,7 +54,11 @@ def _path_to_polygon(path_data: str) -> Optional[Polygon]:
     poly = Polygon(rings[0])
     if not poly.is_valid:
         poly = make_valid(poly)
-    return poly if poly.geom_type == "Polygon" else None
+    if poly.geom_type == "Polygon":
+        return poly
+    if poly.geom_type == "MultiPolygon":
+        return max(poly.geoms, key=lambda p: p.area)
+    return None
 
 
 def _calculate_total_traverse(paths: List[PathRecord]) -> float:

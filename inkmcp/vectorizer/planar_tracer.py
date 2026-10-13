@@ -28,6 +28,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import logging
+import math
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple, Union
 
@@ -89,6 +90,8 @@ class PlanarTraceResult:
 def _load_rgba(image: Union[str, Path, Image.Image, np.ndarray]) -> np.ndarray:
     if isinstance(image, np.ndarray):
         arr = image
+        if arr.ndim == 3 and arr.shape[2] == 1:
+            arr = arr[:, :, 0]
         if arr.ndim == 2:
             arr = np.stack([arr] * 3 + [np.full_like(arr, 255)], -1)
         elif arr.shape[2] == 3:
@@ -121,6 +124,8 @@ def build_palette(rgba: np.ndarray, cfg: PlanarTraceConfig, preflattened: bool =
     samples = rgb[flat].astype(np.float32)
     if len(samples) < 64:
         samples = rgb[opaque].astype(np.float32)
+    if len(samples) == 0:
+        return np.zeros((1, 3), dtype=np.float32)
     rng = np.random.default_rng(0)
     if len(samples) > 60000:
         samples = samples[rng.choice(len(samples), 60000, replace=False)]
@@ -223,8 +228,8 @@ def label_pixels(rgba: np.ndarray, palette: np.ndarray, alpha_threshold: int, pe
     saturated inks (navy/plum outlines) to a neutral grey when the exact ink is
     not in the palette.
     """
-    rgb = rgba[:, :, :3].astype(np.float32)
-    pal = np.asarray(palette, np.float32)
+    rgb: np.ndarray = rgba[:, :, :3].astype(np.float32)
+    pal: np.ndarray = np.asarray(palette, np.float32)
     if perceptual:
         rgb = cv2.cvtColor(rgb / 255.0, cv2.COLOR_RGB2LAB)
         pal = cv2.cvtColor(pal.reshape(1, -1, 3) / 255.0, cv2.COLOR_RGB2LAB).reshape(-1, 3)
@@ -517,16 +522,16 @@ def extract_chains(lab: np.ndarray) -> List[Chain]:
         for d in range(4):
             arr, vis, ii, jj = crack(i, j, d)
             if 0 <= ii < arr.shape[0] and 0 <= jj < arr.shape[1] and arr[ii, jj] and not vis[ii, jj]:
-                pts, l, r = walk(i, j, d, False)
-                chains.append(Chain(np.array(pts, np.float64) - 1.0, l, r, False))
+                pts, lbl_left, lbl_right = walk(i, j, d, False)
+                chains.append(Chain(np.array(pts, np.float64) - 1.0, lbl_left, lbl_right, False))
     # closed loops without junctions
     for arr, vis, d in ((hb, hv, 0), (vb, vv, 1)):
         rem = np.argwhere(arr & ~vis)
         for i, j in rem.tolist():
             if vis[i, j]:
                 continue
-            pts, l, r = walk(i, j, d, True)
-            chains.append(Chain(np.array(pts, np.float64) - 1.0, l, r, True))
+            pts, lbl_left, lbl_right = walk(i, j, d, True)
+            chains.append(Chain(np.array(pts, np.float64) - 1.0, lbl_left, lbl_right, True))
     return chains
 
 
@@ -594,7 +599,7 @@ def _find_corners(pts: np.ndarray, k: int, angle_deg: float, closed: bool) -> Li
     cos = (v1 * v2).sum(1) / (n1 * n2)
     ang = np.degrees(np.arccos(np.clip(cos, -1, 1)))
     ang[~valid] = 0
-    corners = []
+    corners: List[int] = []
     thr = angle_deg
     for i in np.argsort(-ang):
         if ang[i] < thr:
@@ -728,10 +733,9 @@ class FittedChain:
         pts = [self.start]
         for kind, args in self.segs:
             pts.append(args[-1])
-        new_segs = []
+        new_segs: List[Tuple[str, Tuple[np.ndarray, ...]]] = []
         for idx in range(len(self.segs) - 1, -1, -1):
             kind, args = self.segs[idx]
-            p_from = pts[idx + 1]
             p_to = pts[idx]
             if kind == "L":
                 new_segs.append(("L", (p_to,)))
@@ -759,7 +763,7 @@ def _fit_piece(piece: np.ndarray, cfg: PlanarTraceConfig, step: float) -> List[T
     span = max(1, int(round(1.0 / step)))
     t1 = _tangent_at(piece, 0, True, span)
     t2 = _tangent_at(piece, len(piece) - 1, False, span)
-    out = []
+    out: List[Tuple[str, Tuple[np.ndarray, ...]]] = []
     for b in fit_cubic(piece, t1, t2, cfg.fit_tolerance):
         # degenerate-to-line detection per segment
         out.append(("C", (b[1], b[2], b[3])))
@@ -796,11 +800,11 @@ def fit_chain(chain: Chain, scale: int, cfg: PlanarTraceConfig) -> FittedChain:
             loop = np.vstack([sm, sm[:1]])
             tang = [_unit(sm[(s + 1) % n] - sm[(s - 1) % n]) for s in seams[:-1]]
             tang.append(tang[0])
-            segs = []
+            closed_segs: List[Tuple[str, Tuple[np.ndarray, ...]]] = []
             for a, b, ta, tb in zip(seams[:-1], seams[1:], tang[:-1], tang[1:]):
                 piece = loop[a:b + 1]
-                segs.extend(("C", (bz[1], bz[2], bz[3])) for bz in fit_cubic(piece, ta, -tb, cfg.fit_tolerance))
-            return FittedChain(loop[0], segs)
+                closed_segs.extend(("C", (bz[1], bz[2], bz[3])) for bz in fit_cubic(piece, ta, -tb, cfg.fit_tolerance))
+            return FittedChain(loop[0], closed_segs)
         rs = np.roll(rs, -corners[0], axis=0)
         corners = [(c - corners[0]) % len(rs) for c in corners] + [len(rs)]
         rs = np.vstack([rs, rs[:1]])
@@ -818,6 +822,8 @@ def fit_chain(chain: Chain, scale: int, cfg: PlanarTraceConfig) -> FittedChain:
 
 
 def _fmt(v: float, decimals: int) -> str:
+    if not math.isfinite(v):
+        return "0"
     s = f"{v:.{decimals}f}".rstrip("0").rstrip(".")
     return "0" if s in ("-0", "") else s
 
@@ -863,10 +869,12 @@ def assemble_paths(chains: List[Chain], fitted: List[FittedChain], decimals: int
                     break
                 nxt = [j for j in starts.get(end, []) if not used[j]]
                 if not nxt:
+                    logger.warning("Chain discontinuity encountered for label %s at point %s", lab, end)
                     break
                 cur = nxt[0]
                 guard += 1
                 if guard > 1_000_000:
+                    logger.warning("Loop guard limit exceeded for label %s at point %s", lab, end)
                     break
             cmds.append("Z")
             parts.append("".join(cmds))
@@ -929,7 +937,7 @@ def trace_planar(image: Union[str, Path, Image.Image, np.ndarray], config: Optio
     fitted = [fit_chain(c, s, cfg) for c in chains]
     paths = assemble_paths(chains, fitted, cfg.decimals)
 
-    pal_int = [tuple(int(round(v)) for v in c) for c in palette]
+    pal_int: List[Tuple[int, int, int]] = [(int(round(c[0])), int(round(c[1])), int(round(c[2]))) for c in palette]
     # painter order: largest area first (irrelevant for planar output, nicer in editors)
     areas = {k: int((lab == k).sum()) for k in paths}
     order = sorted(paths, key=lambda k: -areas[k])

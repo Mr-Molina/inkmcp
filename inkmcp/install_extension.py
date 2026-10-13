@@ -20,7 +20,7 @@ if _parent_dir not in sys.path:
 try:
     from inkmcp.platform_utils import get_inkscape_extensions_dir, is_extension_installed
 except ImportError:
-    from platform_utils import get_inkscape_extensions_dir, is_extension_installed
+    from platform_utils import get_inkscape_extensions_dir, is_extension_installed  # type: ignore[no-redef,import-not-found]
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 logger = logging.getLogger("inkmcp.installer")
@@ -29,9 +29,24 @@ logger = logging.getLogger("inkmcp.installer")
 def _is_writable(path: Path) -> bool:
     """Check if the given path (or its nearest existing parent) is writable."""
     cur = path
-    while not cur.exists() and cur != cur.parent:
-        cur = cur.parent
-    return os.access(cur, os.W_OK)
+    try:
+        while not cur.exists() and cur != cur.parent:
+            cur = cur.parent
+    except (OSError, PermissionError):
+        return False
+
+    if not os.access(cur, os.W_OK):
+        return False
+
+    if cur.is_dir():
+        test_file = cur / f".inkmcp_write_test_{os.getpid()}"
+        try:
+            test_file.touch(exist_ok=True)
+            test_file.unlink(missing_ok=True)
+        except (OSError, PermissionError):
+            return False
+
+    return True
 
 
 def _handle_remove_readonly(func, path, exc_info):
@@ -52,9 +67,9 @@ def _on_exc_remove_readonly(func, path, exc):
         logger.warning("Failed to remove %s: %s", path, e)
 
 
-def check_extension_status(target_dir: Optional[Path] = None) -> bool:
+def check_extension_status(target_dir: Optional[Path] = None, require_package: bool = False) -> bool:
     """Return True if extension files are present in target directory."""
-    return is_extension_installed(target_dir)
+    return is_extension_installed(target_dir, require_package=require_package)
 
 
 def install_extension(
@@ -109,7 +124,9 @@ def install_extension(
             return False
 
         if dest_pkg.exists() and force and not dry_run:
-            if sys.version_info >= (3, 12):
+            if dest_pkg.is_symlink():
+                dest_pkg.unlink()
+            elif sys.version_info >= (3, 12):
                 shutil.rmtree(dest_pkg, onexc=_on_exc_remove_readonly)
             else:
                 shutil.rmtree(dest_pkg, onerror=_handle_remove_readonly)

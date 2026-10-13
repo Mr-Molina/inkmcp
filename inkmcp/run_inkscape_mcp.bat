@@ -9,7 +9,7 @@ if defined PYTHONPATH (
     set "PYTHONPATH=%~dp0.."
 )
 
-if not exist "venv\" (
+if not exist "venv\Scripts\python.exe" (
     echo Creating Python virtual environment... >&2
     python -m venv venv
     call venv\Scripts\activate.bat
@@ -19,4 +19,4 @@ if not exist "venv\" (
 )
 
 python -m inkmcp.inkscape_mcp_server
-endlocal
+endlocal & exit /b %ERRORLEVEL%

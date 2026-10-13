@@ -1,7 +1,6 @@
 """Unit tests for inkmcp.vectorizer.trapping."""
 
-import pytest
-from shapely.geometry import box, MultiPolygon, Polygon
+from shapely.geometry import Polygon
 
 from inkmcp.vectorizer.core import PathRecord, parse_svg_path_to_rings
 from inkmcp.vectorizer.topology import LayerGroup
@@ -94,8 +93,8 @@ def test_trapping_preserves_outer_silhouette():
     trapped = apply_choke_spread_trapping([layer1, layer2], trap_distance=2.0)
 
     # Check that neither polygon extends beyond minx < 10, miny < 10, maxx > 90, maxy > 90
-    for l in trapped:
-        for p in l.paths:
+    for layer in trapped:
+        for p in layer.paths:
             rings = parse_svg_path_to_rings(p.path_data)
             poly = Polygon(rings[0])
             minx, miny, maxx, maxy = poly.bounds

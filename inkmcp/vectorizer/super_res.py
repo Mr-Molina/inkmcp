@@ -1,7 +1,7 @@
 """Edge-preserving super-resolution and subpixel quantization module."""
 
 import logging
-from typing import List, Optional, Tuple
+from typing import List, Tuple
 import cv2
 import numpy as np
 from PIL import Image
@@ -31,7 +31,13 @@ def upscale_edge_preserving(
     Returns:
         Upscaled uint8 numpy array with smoothed plateaus and sharp edges.
     """
+    if not (1 <= scale <= 8):
+        raise ValueError(f"scale must be between 1 and 8, got {scale}")
     h, w = image.shape[:2]
+    if w * scale > 8192 or h * scale > 8192:
+        raise ValueError(
+            f"Upscaled dimensions ({w * scale}x{h * scale}) exceed maximum allowed dimension of 8192"
+        )
     # Convert RGB to BGR for OpenCV processing
     has_alpha = image.shape[2] == 4 if len(image.shape) > 2 else False
     if has_alpha:
@@ -74,6 +80,11 @@ def quantize_to_palette_subpixel(
     Returns:
         Quantized uint8 array matching palette colors with alpha preserved.
     """
+    if not palette_rgb:
+        return image.copy()
+    if block_size <= 0:
+        raise ValueError(f"block_size must be positive, got {block_size}")
+
     pal_arr = np.array(palette_rgb, dtype=np.float32)
     h, w = image.shape[:2]
     has_alpha = image.shape[2] == 4 if len(image.shape) > 2 else False
@@ -118,12 +129,13 @@ class SuperResolutionProcessor:
     ) -> Image.Image:
         """Processes input image with Lanczos4 expansion, bilateral filtering, and palette quantization."""
         from pathlib import Path
+        pil_img: Image.Image
         if isinstance(image_input, (str, Path)):
-            pil_img = Image.open(str(image_input))
-            if pil_img.mode in ("RGBA", "LA") or "transparency" in pil_img.info:
-                pil_img = pil_img.convert("RGBA")
-            else:
-                pil_img = pil_img.convert("RGB")
+            with Image.open(str(image_input)) as raw_img:
+                if raw_img.mode in ("RGBA", "LA") or "transparency" in raw_img.info:
+                    pil_img = raw_img.convert("RGBA")
+                else:
+                    pil_img = raw_img.convert("RGB")
             arr = np.array(pil_img)
         elif isinstance(image_input, Image.Image):
             if image_input.mode in ("RGBA", "LA") or "transparency" in image_input.info:
@@ -141,11 +153,12 @@ class SuperResolutionProcessor:
 
         # 2. Extract discrete palette and block-quantize if requested
         if self.block_quantize and num_colors > 0:
+            clamped_colors = max(2, min(32, num_colors))
             from inkmcp.vectorizer.preprocessor import ImagePreprocessor
             from inkmcp.vectorizer.palette import hex_to_rgb
             prep = ImagePreprocessor()
             prep_res = prep.process(
-                Image.fromarray(arr), num_colors=num_colors, denoise=self.denoise
+                Image.fromarray(arr), num_colors=clamped_colors, denoise=self.denoise
             )
             palette_rgb = [hex_to_rgb(hex_code) for hex_code in prep_res.palette]
             if palette_rgb:

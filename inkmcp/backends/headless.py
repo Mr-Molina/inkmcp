@@ -79,7 +79,9 @@ class HeadlessSvgBackend(InkscapeBackend):
 
         svg_root = self._creator.svg
         
-        backup_doc = copy.deepcopy(self._doc)
+        backup_doc = None
+        if op_type not in ("get_info", "get_element_info"):
+            backup_doc = copy.deepcopy(self._doc)
 
         try:
             if op_type == "create":
@@ -150,9 +152,10 @@ class HeadlessSvgBackend(InkscapeBackend):
                 }
 
         except Exception as e:
-            self._doc = backup_doc
-            self._creator.svg = self._doc.getroot()
-            self._creator.document = self._doc
+            if backup_doc is not None:
+                self._doc = backup_doc
+                self._creator.svg = self._doc.getroot()
+                self._creator.document = self._doc
             logger.error("Headless operation failed: %s", e)
             return {"status": "error", "data": {"error": str(e)}}
 

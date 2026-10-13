@@ -148,6 +148,8 @@ class TestExecuteOperationResponseHandling:
         # Verify execute_operation returns a structured response without crashing
         assert "status" in res
         assert "data" in res
+        assert res["status"] == "error"
+        assert "error" in res["data"]
 
 
 def test_inkscape_connection_selects_windows_backend():

@@ -3,6 +3,7 @@ from pathlib import Path
 import re
 import tempfile
 from typing import Any, Dict, Optional
+from xml.sax.saxutils import escape
 import cv2
 import numpy as np
 from PIL import Image
@@ -32,6 +33,9 @@ class ColoringBookPipeline:
         if not image_path:
             return create_error_response("image_path is required")
 
+        if not Path(image_path).is_file():
+            return create_error_response(f"Source image not found: {image_path}")
+
         outline_path = params.get("outline_path")
         output_path = params.get("output_path")
         num_colors = int(params.get("num_colors", 8))
@@ -40,10 +44,18 @@ class ColoringBookPipeline:
         inject_to_inkscape = bool(params.get("inject_to_inkscape", True))
 
         # 1. Color Inventory
-        inventory = ColorInventory.from_image(image_path, num_colors=num_colors)
+        try:
+            inventory = ColorInventory.from_image(image_path, num_colors=num_colors)
+        except Exception as e:
+            return create_error_response(f"Failed to generate color inventory: {e}")
 
         # 2. Outline Ingestion
+        with Image.open(image_path) as src_img:
+            img_w, img_h = src_img.size
+
         bin_outline = self._outline_gen.generate_outline(image_path, outline_path=outline_path)
+        if bin_outline.shape[:2] != (img_h, img_w):
+            bin_outline = cv2.resize(bin_outline, (img_w, img_h), interpolation=cv2.INTER_NEAREST)
 
         engine = str(params.get("engine", "planar")).strip().lower()
 
@@ -105,25 +117,40 @@ class ColoringBookPipeline:
             region_mask = (labels == lbl).astype(np.uint8) * 255
             # Tuck slightly under black outlines so no white gap lines appear
             region_mask = cv2.dilate(region_mask, choke_kernel, iterations=1)
-            contours, _ = cv2.findContours(region_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_TC89_KCOS)
-            for c_idx, cnt in enumerate(contours):
-                if len(cnt) >= 3:
-                    approx = cv2.approxPolyDP(cnt, 0.75, True)
-                    if len(approx) >= 3:
-                        pts = [f"{pt[0][0]},{pt[0][1]}" for pt in approx]
-                        d = f"M {pts[0]} L " + " ".join(pts[1:]) + " Z"
-                        path_id = f"fill_{idx:03d}_{c_idx}"
-                        fill_paths_xml.append(
-                            f'    <path id="{path_id}" fill="{color}" stroke="none" d="{d}" />'
-                        )
-                        fill_paths_records.append({
-                            "id": path_id,
-                            "fill": color,
-                            "d": d,
-                        })
+            contours, hierarchy = cv2.findContours(region_mask, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_TC89_KCOS)
+            if hierarchy is not None and len(contours) > 0:
+                for c_idx, cnt in enumerate(contours):
+                    # Only iterate exterior boundaries (parent == -1)
+                    if hierarchy[0][c_idx][3] != -1:
+                        continue
+                    if len(cnt) >= 3:
+                        approx = cv2.approxPolyDP(cnt, 0.75, True)
+                        if len(approx) >= 3:
+                            pts = [f"{pt[0][0]},{pt[0][1]}" for pt in approx]
+                            d_parts = [f"M {pts[0]} L " + " ".join(pts[1:]) + " Z"]
+                            # Support interior holes in fill regions
+                            child_idx = hierarchy[0][c_idx][2]
+                            while child_idx != -1:
+                                child_cnt = contours[child_idx]
+                                if len(child_cnt) >= 3:
+                                    child_approx = cv2.approxPolyDP(child_cnt, 0.75, True)
+                                    if len(child_approx) >= 3:
+                                        h_pts = [f"{pt[0][0]},{pt[0][1]}" for pt in child_approx]
+                                        d_parts.append(f"M {h_pts[0]} L " + " ".join(h_pts[1:]) + " Z")
+                                child_idx = hierarchy[0][child_idx][0]
+                            d = " ".join(d_parts)
+                            path_id = f"fill_{idx:03d}_{c_idx}"
+                            fill_paths_xml.append(
+                                f'    <path id="{escape(path_id)}" fill="{escape(color)}" stroke="none" d="{escape(d)}" />'
+                            )
+                            fill_paths_records.append({
+                                "id": path_id,
+                                "fill": color,
+                                "d": d,
+                            })
 
         line_paths_xml = [
-            f'    <path id="{p["id"]}" fill="#000000" fill-rule="nonzero" stroke="none" d="{p["d"]}" />'
+            f'    <path id="{escape(p["id"])}" fill="#000000" fill-rule="nonzero" stroke="none" d="{escape(p["d"])}" />'
             for p in line_path_records
         ]
 
@@ -212,9 +239,9 @@ class ColoringBookPipeline:
                 ink_exe = find_inkscape_executable()
                 if ink_exe:
                     subprocess.run(
-                        [str(ink_exe), "-q", "--actions=select-all;page-fit-to-selection;zoom-drawing;select-clear"],
+                        [str(ink_exe), str(resolved_output), "-q", "--actions=select-all;page-fit-to-selection;zoom-drawing;select-clear"],
                         capture_output=True,
-                        timeout=10,
+                        timeout=5,
                     )
             except Exception:
                 pass

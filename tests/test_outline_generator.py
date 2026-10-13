@@ -1,4 +1,3 @@
-import pytest
 import numpy as np
 import cv2
 from PIL import Image
@@ -19,7 +18,6 @@ def test_load_existing_outline(tmp_path):
     assert set(np.unique(arr)).issubset({0, 255})
 
 def test_algorithmic_edge_fallback(tmp_path):
-    src = Image.new("RGB", (100, 100), (255, 255, 255))
     src_arr = np.full((100, 100, 3), 255, dtype=np.uint8)
     cv2.circle(src_arr, (50, 50), 20, (0, 0, 255), -1)
     src_path = tmp_path / "circle.png"

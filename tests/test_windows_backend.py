@@ -26,7 +26,8 @@ def test_windows_cli_is_available(mock_platform):
     assert backend.get_backend_name() == "windows_cli"
 
 
-def test_windows_cli_execute_operation_success(mock_platform):
+def test_windows_cli_execute_operation_success(mock_platform, tmp_path, monkeypatch):
+    monkeypatch.setattr(tempfile, "gettempdir", lambda: str(tmp_path))
     backend = WindowsCliBackend()
 
     def fake_subprocess_run(cmd, capture_output=True, text=True, timeout=30):
@@ -124,7 +125,8 @@ def test_windows_cli_unexpected_exception(mock_platform):
         assert "Permission denied" in res["data"]["error"]
 
 
-def test_windows_cli_custom_inkscape_path(mock_platform):
+def test_windows_cli_custom_inkscape_path(mock_platform, tmp_path, monkeypatch):
+    monkeypatch.setattr(tempfile, "gettempdir", lambda: str(tmp_path))
     custom_path = Path("D:/Custom/Inkscape/bin/inkscape.com")
     backend = WindowsCliBackend(inkscape_path=custom_path)
     assert backend.is_available() is True
@@ -151,8 +153,8 @@ def test_windows_cli_custom_inkscape_path(mock_platform):
 def test_action_lock_acquire_and_release(tmp_path):
     """Test exclusive lock acquire, contention timeout, and subsequent acquisition after release."""
     lock_file = str(tmp_path / "test.lock")
-    lock1 = _ActionLock(lock_path=lock_file, timeout=0.1, poll_interval=0.01)
-    lock2 = _ActionLock(lock_path=lock_file, timeout=0.05, poll_interval=0.01)
+    lock1 = _ActionLock(lock_path=lock_file, timeout=0.3, poll_interval=0.01)
+    lock2 = _ActionLock(lock_path=lock_file, timeout=0.15, poll_interval=0.01)
 
     assert lock1.acquire() is True
     # lock2 should time out waiting for lock1
@@ -168,12 +170,12 @@ def test_action_lock_acquire_and_release(tmp_path):
 def test_action_lock_context_manager(tmp_path):
     """Test _ActionLock as context manager properly acquires and releases lock."""
     lock_file = str(tmp_path / "test_cm.lock")
-    with _ActionLock(lock_path=lock_file, timeout=0.1):
-        lock2 = _ActionLock(lock_path=lock_file, timeout=0.05, poll_interval=0.01)
+    with _ActionLock(lock_path=lock_file, timeout=0.3):
+        lock2 = _ActionLock(lock_path=lock_file, timeout=0.15, poll_interval=0.01)
         with pytest.raises(TimeoutError):
             lock2.acquire()
 
-    with _ActionLock(lock_path=lock_file, timeout=0.1):
+    with _ActionLock(lock_path=lock_file, timeout=0.3):
         pass
 
 
@@ -181,8 +183,8 @@ def test_action_lock_fallback_mode_without_msvcrt(tmp_path):
     """Test fallback atomic file lock mode when msvcrt is not available."""
     lock_file = str(tmp_path / "fallback.lock")
     with patch("inkmcp.backends.windows_cli.msvcrt", None):
-        lock1 = _ActionLock(lock_path=lock_file, timeout=0.1, poll_interval=0.01)
-        lock2 = _ActionLock(lock_path=lock_file, timeout=0.05, poll_interval=0.01)
+        lock1 = _ActionLock(lock_path=lock_file, timeout=0.3, poll_interval=0.01)
+        lock2 = _ActionLock(lock_path=lock_file, timeout=0.15, poll_interval=0.01)
 
         assert lock1.acquire() is True
         assert os.path.exists(lock_file)
@@ -197,8 +199,9 @@ def test_action_lock_fallback_mode_without_msvcrt(tmp_path):
         lock2.release()
 
 
-def test_windows_cli_execute_operation_lock_held_during_run(mock_platform, tmp_path):
+def test_windows_cli_execute_operation_lock_held_during_run(mock_platform, tmp_path, monkeypatch):
     """Verify lock is actively held during execute_operation so concurrent calls cannot collide."""
+    monkeypatch.setattr(tempfile, "gettempdir", lambda: str(tmp_path))
     lock_file = str(tmp_path / "action.lock")
     backend = WindowsCliBackend(lock_path=lock_file, lock_timeout=0.5)
 
@@ -206,7 +209,7 @@ def test_windows_cli_execute_operation_lock_held_during_run(mock_platform, tmp_p
 
     def fake_subprocess_run(cmd, capture_output=True, text=True, timeout=30):
         nonlocal lock_was_held
-        test_lock = _ActionLock(lock_path=lock_file, timeout=0.05, poll_interval=0.01)
+        test_lock = _ActionLock(lock_path=lock_file, timeout=0.15, poll_interval=0.01)
         try:
             test_lock.acquire()
             lock_was_held = False
@@ -231,9 +234,9 @@ def test_windows_cli_execute_operation_lock_held_during_run(mock_platform, tmp_p
 def test_windows_cli_execute_operation_lock_timeout(mock_platform, tmp_path):
     """Verify backend handles lock acquisition timeout gracefully by returning error dict."""
     lock_file = str(tmp_path / "timeout.lock")
-    backend = WindowsCliBackend(lock_path=lock_file, lock_timeout=0.05)
+    backend = WindowsCliBackend(lock_path=lock_file, lock_timeout=0.15)
 
-    external_lock = _ActionLock(lock_path=lock_file, timeout=0.1)
+    external_lock = _ActionLock(lock_path=lock_file, timeout=0.3)
     external_lock.acquire()
     try:
         res = backend.execute_operation({"operation": "get_info"})

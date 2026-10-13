@@ -52,7 +52,8 @@ if INKMCP_CLI_PATH:
 
 if not INKMCP_CLI_PATH:
     # Try to auto-detect
-    script_dir = os.path.dirname(os.path.abspath(__file__))
+    this_file = globals().get('__file__')
+    script_dir = os.path.dirname(os.path.abspath(this_file)) if this_file else os.getcwd()
     possible_paths = [
         os.path.join(script_dir, 'inkmcp', 'inkmcpcli.py'),  # Same repo
         os.path.join(script_dir, '..', 'inkmcp', 'inkmcpcli.py'),  # Parent dir
@@ -118,6 +119,31 @@ def serialize_variables(local_vars: Dict[str, Any], exclude_names: set = None) -
     return serializable
 
 
+def get_python_executable() -> str:
+    """Resolve a real Python binary for subprocess invocation.
+
+    When running inside Blender, sys.executable points to blender.exe.
+    Resolves the bundled or system python executable instead.
+    """
+    import shutil
+    exe = sys.executable
+    if "blender" in os.path.basename(exe).lower():
+        candidates = [
+            os.path.join(sys.prefix, "bin", "python.exe"),
+            os.path.join(sys.prefix, "python.exe"),
+            os.path.join(os.path.dirname(exe), "python.exe"),
+            os.path.join(sys.prefix, "bin", "python3"),
+            os.path.join(sys.prefix, "python3"),
+        ]
+        for candidate in candidates:
+            if os.path.isfile(candidate):
+                return candidate
+        system_py = shutil.which("python") or shutil.which("python3")
+        if system_py:
+            return system_py
+    return exe
+
+
 def execute_inkscape_block(code: str, variables: Dict[str, Any]) -> Dict[str, Any]:
     """Execute code block in Inkscape via inkmcpcli."""
     if not INKMCP_CLI_PATH:
@@ -137,18 +163,17 @@ def execute_inkscape_block(code: str, variables: Dict[str, Any]) -> Dict[str, An
                 f"_inkmcp_vars = json.loads({json.dumps(serialized_json)})",
             ]
             for key in variables:
-                if not key.isidentifier(): continue
+                if not key.isidentifier():
+                    continue
                 var_injections.append(f"{key} = _inkmcp_vars[{json.dumps(key)}]")
             var_injections.append("del _inkmcp_vars")
             full_code = '\n'.join(var_injections) + '\n' + code
-        except Exception:
-            var_injections = []
-            for key, value in variables.items():
-                if not key.isidentifier(): continue
-                repr_value = repr(value)
-                if repr_value.startswith('<'): continue
-                var_injections.append(f"{key} = {repr_value}")
-            full_code = '\n'.join(var_injections) + '\n' + code if var_injections else code
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).warning(
+                "Variable serialization failed, executing without injected variables: %s", e
+            )
+            full_code = code
     else:
         full_code = code
     
@@ -159,12 +184,15 @@ def execute_inkscape_block(code: str, variables: Dict[str, Any]) -> Dict[str, An
             f.write(full_code)
             temp_file = f.name
 
+        py_exe = get_python_executable()
+        creationflags = 0x08000000 if os.name == 'nt' else 0
         try:
             result = subprocess.run(
-                [sys.executable, INKMCP_CLI_PATH, 'execute-code', '--pretty', '-f', temp_file],
+                [py_exe, INKMCP_CLI_PATH, 'execute-code', '--pretty', '-f', temp_file],
                 capture_output=True,
                 text=True,
-                timeout=30
+                timeout=30,
+                creationflags=creationflags,
             )
         finally:
             if temp_file:
@@ -275,7 +303,7 @@ def execute_hybrid(code: str):
                 serializable = serialize_variables(local_env)
                 shared_context.update(serializable)
                 
-            except Exception as e:
+            except Exception:
                 import traceback
                 print(f"Error in Blender block {block_idx}:", file=sys.stderr)
                 traceback.print_exc()

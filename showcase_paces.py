@@ -12,8 +12,8 @@ Demonstrates full suite of inkmcp capabilities:
 
 import json
 import os
+import shutil
 import subprocess
-import sys
 import tempfile
 from pathlib import Path
 
@@ -21,7 +21,15 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 SVG_PATH = ROOT / "test_artwork.svg"
 PNG_PATH = ROOT / "test_artwork.png"
-INKSCAPE_COM = r"C:\Program Files\Inkscape\bin\inkscape.com"
+
+# SEC-101: Resolve Inkscape executable with shutil.which and Windows fallback
+_resolved_inkscape = shutil.which("inkscape") or shutil.which("inkscape.com")
+if _resolved_inkscape:
+    INKSCAPE_COM = _resolved_inkscape
+else:
+    _default_win_path = r"C:\Program Files\Inkscape\bin\inkscape.com"
+    INKSCAPE_COM = _default_win_path if os.path.exists(_default_win_path) else "inkscape"
+
 try:
     from inkmcp.platform_utils import find_inkscape_executable
     _ink = find_inkscape_executable()
@@ -30,32 +38,38 @@ try:
 except ImportError:
     pass
 
-params_file = os.path.join(tempfile.gettempdir(), "mcp_params.json")
-resp_file = os.path.join(tempfile.gettempdir(), "inkmcp_showcase_resp.json")
-
 
 def run_inkmcp_action(payload: dict) -> dict:
     """Execute an inkmcp payload via Inkscape extension architecture."""
-    payload["response_file"] = resp_file
-    with open(params_file, "w", encoding="utf-8") as f:
-        json.dump(payload, f)
+    # INFRA-101: Cleaned-up temp files in try-finally block
+    params_file = os.path.join(tempfile.gettempdir(), "mcp_params.json")
+    resp_fd, resp_file = tempfile.mkstemp(prefix="inkmcp_showcase_resp_", suffix=".json")
+    os.close(resp_fd)
 
-    safe_svg_path = str(SVG_PATH).replace(';', '_')
-    actions = f"org.khema.inkscape.mcp.noprefs;export-filename:{safe_svg_path};export-overwrite;export-do"
-    cmd = [INKSCAPE_COM, f"--actions={actions}", str(SVG_PATH)]
-    res = subprocess.run(cmd, capture_output=True, text=True, timeout=35)
-    if res.returncode != 0:
-        print(f"Error executing action: {res.stderr}")
+    try:
+        payload["response_file"] = resp_file
+        with open(params_file, "w", encoding="utf-8") as f:
+            json.dump(payload, f)
 
-    if os.path.exists(resp_file):
-        with open(resp_file, "r", encoding="utf-8") as rf:
-            data = json.load(rf)
-        try:
-            os.remove(resp_file)
-        except OSError:
-            pass
-        return data
-    return {"status": "error", "message": "No response file produced"}
+        safe_svg_path = str(SVG_PATH).replace(';', '_')
+        actions = f"org.khema.inkscape.mcp.noprefs;export-filename:{safe_svg_path};export-overwrite;export-do"
+        cmd = [INKSCAPE_COM, f"--actions={actions}", str(SVG_PATH)]
+        res = subprocess.run(cmd, capture_output=True, text=True, timeout=35)
+        if res.returncode != 0:
+            print(f"Error executing action: {res.stderr}")
+
+        if os.path.exists(resp_file):
+            with open(resp_file, "r", encoding="utf-8") as rf:
+                data = json.load(rf)
+            return data
+        return {"status": "error", "message": "No response file produced"}
+    finally:
+        for f_path in (params_file, resp_file):
+            if os.path.exists(f_path):
+                try:
+                    os.unlink(f_path)
+                except OSError:
+                    pass
 
 
 def main():

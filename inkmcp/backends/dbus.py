@@ -9,6 +9,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+from pathlib import Path
 from typing import Any, Dict
 
 from inkmcp.backends.base import InkscapeBackend
@@ -86,6 +87,21 @@ class DBusBackend(InkscapeBackend):
                 os.close(resp_fd)
                 created_temp_response = True
 
+            # Validate response_file realpath resides strictly inside tempfile.gettempdir() (SEC-033)
+            temp_dir_path = Path(tempfile.gettempdir()).resolve()
+            try:
+                resp_path = Path(response_file).resolve()
+                is_safe = resp_path.is_relative_to(temp_dir_path) and resp_path != temp_dir_path
+            except (ValueError, TypeError, Exception):
+                is_safe = False
+
+            if not is_safe:
+                logger.error("Response file path outside temp directory: %s", response_file)
+                return {
+                    "status": "error",
+                    "data": {"error": f"Response file error: Path outside temp directory: {response_file}"},
+                }
+
             payload = dict(operation_data)
             payload["response_file"] = response_file
 
@@ -97,7 +113,7 @@ class DBusBackend(InkscapeBackend):
                 json.dump(payload, f)
 
             # 3. Execute via D-Bus
-            safe_params = params_file.replace("'", "\\'")
+            safe_params = params_file.replace("\\", "\\\\").replace("'", "\\'")
             cmd = [
                 "gdbus",
                 "call",
@@ -122,25 +138,8 @@ class DBusBackend(InkscapeBackend):
                     "data": {"error": f"D-Bus call failed: {result.stderr}"},
                 }
 
-            # 4. Validate response_file realpath resides strictly inside tempfile.gettempdir() (SEC-002)
-            temp_dir = os.path.realpath(tempfile.gettempdir())
-            resp_real = os.path.realpath(response_file)
-            try:
-                is_safe = (
-                    os.path.commonpath([temp_dir, resp_real]) == temp_dir
-                    and resp_real != temp_dir
-                )
-            except (ValueError, TypeError):
-                is_safe = False
-
-            if not is_safe:
-                logger.error("Response file path outside temp directory: %s", response_file)
-                return {
-                    "status": "error",
-                    "data": {"error": f"Response file error: Path outside temp directory: {response_file}"},
-                }
-
-            # 5. Verify response file exists and has non-zero size (SEC-003)
+            # 4. Verify response file exists and has non-zero size (SEC-003)
+            resp_real = str(Path(response_file).resolve())
             if not os.path.exists(resp_real) or os.path.getsize(resp_real) == 0:
                 logger.error("Response file missing or empty: %s", response_file)
                 return {

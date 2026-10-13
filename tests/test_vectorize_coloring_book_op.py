@@ -1,4 +1,3 @@
-import pytest
 from unittest.mock import patch
 from PIL import Image
 from inkmcp.inkmcpops.vectorize_operations import vectorize_image_operation

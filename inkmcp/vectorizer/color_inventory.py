@@ -1,4 +1,5 @@
 """Color inventory and spatial indexing module using CIELAB color clustering."""
+import math
 from pathlib import Path
 from typing import List
 import cv2
@@ -14,6 +15,9 @@ class ColorInventory:
 
     @classmethod
     def from_image(cls, image_path: str, num_colors: int = 8) -> "ColorInventory":
+        if num_colors <= 0:
+            raise ValueError(f"num_colors must be greater than 0, got {num_colors}")
+
         path_obj = Path(image_path)
         if not path_obj.exists() or not path_obj.is_file():
             raise FileNotFoundError(f"Source image not found: {image_path}")
@@ -24,11 +28,15 @@ class ColorInventory:
 
         img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
         h, w = img_rgb.shape[:2]
+        if h <= 0 or w <= 0:
+            raise ValueError(f"Invalid image dimensions: {w}x{h}")
 
         max_dim = 256
         scale = min(1.0, max_dim / max(h, w))
         if scale < 1.0:
-            thumb_rgb = cv2.resize(img_rgb, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA)
+            thumb_w = max(1, int(w * scale))
+            thumb_h = max(1, int(h * scale))
+            thumb_rgb = cv2.resize(img_rgb, (thumb_w, thumb_h), interpolation=cv2.INTER_AREA)
         else:
             thumb_rgb = img_rgb.copy()
 
@@ -47,7 +55,10 @@ class ColorInventory:
 
         criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 20, 1.0)
         flags = cv2.KMEANS_PP_CENTERS
-        _, labels, centers_lab = cv2.kmeans(pixels_lab, actual_k, None, criteria, 10, flags)
+        best_labels = np.empty((0, 0), dtype=np.int32)
+        _, labels, centers_lab = cv2.kmeans(
+            pixels_lab.astype(np.float32), actual_k, best_labels, criteria, 10, flags
+        )
 
         flat_labels = labels.flatten()
         pixels_rgb = thumb_rgb.reshape(-1, 3)
@@ -72,10 +83,16 @@ class ColorInventory:
         return list(self._palette)
 
     def get_color_at(self, u: float, v: float) -> str:
+        h, w = self._spatial_map.shape[:2]
+        if h <= 0 or w <= 0:
+            return "#000000"
+        if math.isnan(u) or math.isinf(u):
+            u = 0.0
+        if math.isnan(v) or math.isinf(v):
+            v = 0.0
         u_clamped = max(0.0, min(1.0, float(u)))
         v_clamped = max(0.0, min(1.0, float(v)))
-        h, w = self._spatial_map.shape[:2]
-        x = min(int(u_clamped * w), w - 1)
-        y = min(int(v_clamped * h), h - 1)
+        x = max(0, min(int(u_clamped * w), w - 1))
+        y = max(0, min(int(v_clamped * h), h - 1))
         pixel = self._spatial_map[y, x]
         return f"#{pixel[0]:02X}{pixel[1]:02X}{pixel[2]:02X}"

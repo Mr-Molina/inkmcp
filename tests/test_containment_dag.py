@@ -1,7 +1,6 @@
 """Unit tests for inkmcp.vectorizer.containment_dag."""
 
 import networkx as nx
-import pytest
 from shapely.geometry import Point, box
 
 from inkmcp.vectorizer.containment_dag import (

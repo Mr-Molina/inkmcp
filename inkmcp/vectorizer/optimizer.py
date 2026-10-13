@@ -157,7 +157,7 @@ def regularize_svg_path_rdp(d_str: str, max_deviation: float = 1.0) -> str:
     )
     commands = []
     curr_cmd = None
-    curr_args = []
+    curr_args: List[float] = []
     for letter, num in tokens:
         if letter:
             if curr_cmd is not None:
@@ -237,6 +237,25 @@ def regularize_svg_path_rdp(d_str: str, max_deviation: float = 1.0) -> str:
     return " ".join(out_parts)
 
 
+def _convert_initial_m_to_absolute(sp: str, abs_start: Tuple[float, float]) -> str:
+    """Converts a leading relative 'm' command in a subpath to an absolute 'M' command."""
+    if not sp.startswith("m"):
+        return sp
+    tokens = re.findall(r"([a-zA-Z])|([-+]?(?:\d*\.\d+|\d+)(?:[eE][-+]?\d+)?)", sp)
+    raw = [letter if letter else num for letter, num in tokens]
+    if len(raw) < 3 or raw[0] != "m":
+        return sp
+    rem_tokens = raw[3:]
+    if rem_tokens and not rem_tokens[0].isalpha():
+        rem_str = "l " + " ".join(rem_tokens)
+    else:
+        rem_str = " ".join(rem_tokens)
+    new_sp = f"M {_format_coord(abs_start[0])} {_format_coord(abs_start[1])}"
+    if rem_str:
+        new_sp += f" {rem_str}"
+    return new_sp
+
+
 def refit_path_d(
     d_str: str,
     min_circularity: float = 0.92,
@@ -255,10 +274,29 @@ def refit_path_d(
     if not subpaths:
         return d_str
 
+    all_rings = parse_svg_path_to_rings(d_str)
+    have_all_rings = len(all_rings) == len(subpaths)
+
     any_change = False
     new_subpaths = []
-    for sp in subpaths:
-        rings = parse_svg_path_to_rings(sp)
+    curr_origin = (0.0, 0.0)
+
+    for idx, sp in enumerate(subpaths):
+        sp_abs = sp
+        if sp.startswith("m") and idx > 0:
+            if have_all_rings and all_rings[idx]:
+                abs_start = all_rings[idx][0]
+                sp_abs = _convert_initial_m_to_absolute(sp, abs_start)
+            else:
+                tokens = re.findall(
+                    r"([a-zA-Z])|([-+]?(?:\d*\.\d+|\d+)(?:[eE][-+]?\d+)?)", sp
+                )
+                raw_nums = [float(num) for _, num in tokens if num]
+                if len(raw_nums) >= 2:
+                    abs_start = (curr_origin[0] + raw_nums[0], curr_origin[1] + raw_nums[1])
+                    sp_abs = _convert_initial_m_to_absolute(sp, abs_start)
+
+        rings = [all_rings[idx]] if (have_all_rings and all_rings[idx]) else parse_svg_path_to_rings(sp_abs)
         if len(rings) == 1:
             is_circ, cx, cy, rx, ry, is_ccw = is_circular_ring(
                 rings[0],
@@ -269,17 +307,23 @@ def refit_path_d(
             )
             if is_circ:
                 any_change = True
-                new_subpaths.append(
-                    generate_bezier_ellipse(cx, cy, rx, ry, is_ccw=is_ccw)
-                )
+                ellipse_d = generate_bezier_ellipse(cx, cy, rx, ry, is_ccw=is_ccw)
+                new_subpaths.append(ellipse_d)
+                curr_origin = (cx, cy - ry)
                 continue
+
         if regularize_lines:
-            reg_sp = regularize_svg_path_rdp(sp, max_deviation=max_deviation)
-            if reg_sp != sp:
+            reg_sp = regularize_svg_path_rdp(sp_abs, max_deviation=max_deviation)
+            if reg_sp != sp_abs:
                 any_change = True
                 new_subpaths.append(reg_sp)
+                if rings and rings[0]:
+                    curr_origin = rings[0][0] if sp.lower().endswith("z") else rings[0][-1]
                 continue
-        new_subpaths.append(sp)
+
+        new_subpaths.append(sp_abs)
+        if rings and rings[0]:
+            curr_origin = rings[0][0] if sp.lower().endswith("z") else rings[0][-1]
 
     return " ".join(new_subpaths) if any_change else d_str
 
@@ -400,6 +444,20 @@ class SvgOptimizer:
             return svg_content
 
         try:
+            # Strip <!DOCTYPE ...> and <!ENTITY ...> declarations before Scour to prevent XML entity expansion bombs (CWE-776 / CWE-611)
+            sanitized_svg = re.sub(
+                r"<!DOCTYPE\b(?:\[[^\]]*\]|[^>])*>",
+                "",
+                svg_content,
+                flags=re.IGNORECASE | re.DOTALL,
+            )
+            sanitized_svg = re.sub(
+                r"<!ENTITY\b[^>]*>",
+                "",
+                sanitized_svg,
+                flags=re.IGNORECASE | re.DOTALL,
+            )
+
             import scour.scour
 
             opts = scour.scour.sanitizeOptions()
@@ -409,7 +467,7 @@ class SvgOptimizer:
             opts.indent_depth = 2
             opts.digits = precision
 
-            scoured = scour.scour.scourString(svg_content, opts)
+            scoured = scour.scour.scourString(sanitized_svg, opts)
             return self._propagate_fill_rule_to_paths(scoured)
         except Exception as e:
             logger.warning("Scour SVG optimization failed, returning unoptimized SVG: %s", e)
@@ -431,10 +489,10 @@ class SvgOptimizer:
             def _add_fill_rule(p_match: re.Match) -> str:
                 path_tag = p_match.group(0)
                 if "fill-rule=" not in path_tag:
-                    return f'<path fill-rule="{rule}"'
+                    return path_tag[:5] + f' fill-rule="{rule}"' + path_tag[5:]
                 return path_tag
 
-            updated_body = re.sub(r"<path\b", _add_fill_rule, body)
+            updated_body = re.sub(r"<path\b[^>]*>", _add_fill_rule, body)
             return f"{group_open}{updated_body}</g>"
 
         pattern = re.compile(

@@ -1,4 +1,5 @@
 import sys
+import pytest
 from pathlib import Path
 
 # Add .agents to sys.path to import validate_powershell_cmd
@@ -68,3 +69,34 @@ class TestPowerShellSyntaxValidator:
         valid, errors = validate_command(cmd)
         assert valid is False
         assert any("dictionary or JSON literals" in e for e in errors)
+
+    def test_detects_short_semicolon_in_python_c(self):
+        cmd = 'python -c "a=1; b=2"'
+        valid, errors = validate_command(cmd)
+        assert valid is False
+        assert any("multi-statement" in e.lower() for e in errors)
+
+    def test_detects_fstrings_in_python_c(self):
+        cmd = 'python -c "x=1; print(f\'val={x}\')"'
+        valid, errors = validate_command(cmd)
+        assert valid is False
+        assert any("f-strings" in e for e in errors)
+
+    def test_accepts_single_quoted_backslash_quote(self):
+        cmd = "Write-Host 'Literal \\\" is safe in single quotes'"
+        valid, errors = validate_command(cmd)
+        assert valid is True
+        assert len(errors) == 0
+
+    def test_accepts_disjoint_double_quotes_with_unquoted_currency(self):
+        cmd = 'Write-Host "first" $100 "second"'
+        valid, errors = validate_command(cmd)
+        assert valid is True
+        assert len(errors) == 0
+
+    def test_cli_missing_args_exits_code_2(self, monkeypatch):
+        from validate_powershell_cmd import main
+        monkeypatch.setattr(sys, "argv", ["validate_powershell_cmd.py"])
+        with pytest.raises(SystemExit) as exc_info:
+            main()
+        assert exc_info.value.code == 2

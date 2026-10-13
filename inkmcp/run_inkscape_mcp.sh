@@ -23,5 +23,8 @@ fi
 export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
 export DBUS_SESSION_BUS_ADDRESS="${DBUS_SESSION_BUS_ADDRESS:-unix:path=${XDG_RUNTIME_DIR}/bus}"
 
+PARENT_DIR="$(dirname "$PWD")"
+export PYTHONPATH="${PARENT_DIR}${PYTHONPATH:+:${PYTHONPATH}}"
+
 # Run the Inkscape MCP server
-exec python main.py
+exec python -m inkmcp.inkscape_mcp_server

@@ -6,7 +6,7 @@ from typing import Dict, List, Optional, Tuple, Union
 
 import numpy as np
 from PIL import Image
-from sklearn.cluster import KMeans
+from sklearn.cluster import KMeans  # type: ignore[import-untyped]
 
 
 @dataclass
@@ -32,7 +32,7 @@ def apply_bilateral_filter(
     Noise is smoothed while sharp contrast boundaries are preserved.
     The alpha channel is preserved as-is.
     """
-    if diameter <= 0:
+    if diameter <= 0 or sigma_color <= 0.0 or sigma_space <= 0.0:
         return img.copy()
 
     arr = np.array(img, dtype=np.float32)
@@ -179,7 +179,7 @@ class ImagePreprocessor:
             if subpixel_scale > 1:
                 scaled_w = width * subpixel_scale
                 scaled_h = height * subpixel_scale
-                working_img = img.resize((scaled_w, scaled_h), Image.LANCZOS)
+                working_img = img.resize((scaled_w, scaled_h), Image.Resampling.LANCZOS)
             else:
                 scaled_w = width
                 scaled_h = height
@@ -252,7 +252,7 @@ class ImagePreprocessor:
             # Cleaned image at original (width, height)
             if subpixel_scale > 1:
                 mask_scaled = Image.fromarray((fg_mask * 255).astype(np.uint8), mode="L")
-                mask_orig = mask_scaled.resize((width, height), Image.BILINEAR)
+                mask_orig = mask_scaled.resize((width, height), Image.Resampling.BILINEAR)
                 fg_orig_mask = np.array(mask_orig) > 127
                 cleaned_arr = np.zeros((height, width, 4), dtype=np.uint8)
                 cleaned_arr[fg_orig_mask, :3] = [r, g, b]
@@ -285,7 +285,7 @@ class ImagePreprocessor:
         if remove_background:
             corner_pixel = img.getpixel((0, 0))
             # Only remove if corner has opacity
-            if corner_pixel[3] > 0:
+            if isinstance(corner_pixel, tuple) and len(corner_pixel) >= 4 and corner_pixel[3] > 0:
                 arr = np.array(img)
                 corner_rgb = np.array(corner_pixel[:3], dtype=np.float32)
                 rgb_data = arr[:, :, :3].astype(np.float32)
@@ -337,8 +337,8 @@ class ImagePreprocessor:
         full_labels = np.full((height, width), -1, dtype=int)
         full_labels[opaque_mask] = cluster_labels
 
-        palette: List[str] = []
-        color_masks: Dict[str, Image.Image] = {}
+        palette = []
+        color_masks = {}
         quantized_rgb = np.copy(rgb)
 
         for idx in sorted_indices:

@@ -1,6 +1,12 @@
 """Vectorization pipeline package for inkmcp."""
 
-from inkmcp.vectorizer.cam_planner import CamPlanResult, optimize_cam_toolpaths, order_inside_out_cuts
+from inkmcp.vectorizer.cam_planner import (
+    CamPlanResult,
+    optimize_cam_toolpaths,
+    optimize_traverse_tsp,
+    order_inside_out_cuts,
+)
+from inkmcp.vectorizer.coloring_book_pipeline import ColoringBookPipeline
 from inkmcp.vectorizer.containment_dag import build_containment_dag, resolve_stacking_order
 from inkmcp.vectorizer.core import (
     PathRecord,
@@ -71,6 +77,8 @@ __all__ = [
     "CamPlanResult",
     "order_inside_out_cuts",
     "optimize_cam_toolpaths",
+    "optimize_traverse_tsp",
+    "ColoringBookPipeline",
     "PipelineConfig",
     "PipelineResult",
     "VectorizationPipeline",
