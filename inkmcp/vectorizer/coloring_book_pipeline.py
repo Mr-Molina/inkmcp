@@ -1,8 +1,9 @@
-"""Coloring book vectorization and live fill pipeline."""
 import os
 from pathlib import Path
 import tempfile
 from typing import Any, Dict, Optional
+import cv2
+import numpy as np
 from PIL import Image
 
 from inkmcp.backends.desktop_automator import InkscapeDesktopAutomator
@@ -52,17 +53,64 @@ class ColoringBookPipeline:
             filter_speckle=4,
         )
 
-        # 4. Generate SVG Document Content
+        # 4. Extract Regions & Generate Vector Fills
         h, w = bin_outline.shape[:2]
-        paths_xml = "\n".join(
-            f'    <path id="{p.id}" fill="#000000" d="{p.path_data}" />'
+        regions = self._topology.extract_fill_regions(bin_outline, min_area=min_region_area)
+
+        _, bin_mask = cv2.threshold(bin_outline, 127, 255, cv2.THRESH_BINARY)
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+        inv_closed = cv2.morphologyEx(cv2.bitwise_not(bin_mask), cv2.MORPH_CLOSE, kernel)
+        processed = cv2.bitwise_not(inv_closed)
+        num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(processed, connectivity=8)
+
+        fill_paths_xml = []
+        fill_paths_records = []
+        choke_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+        commands = []
+
+        for idx, r in enumerate(regions):
+            color = inventory.get_color_at(r.u, r.v)
+            commands.append((color, r.u, r.v))
+            lbl = labels[r.pixel_y, r.pixel_x]
+            if lbl <= 0:
+                continue
+
+            region_mask = (labels == lbl).astype(np.uint8) * 255
+            # Tuck slightly under black outlines so no white gap lines appear
+            region_mask = cv2.dilate(region_mask, choke_kernel, iterations=1)
+            contours, _ = cv2.findContours(region_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_TC89_KCOS)
+            for c_idx, cnt in enumerate(contours):
+                if len(cnt) >= 3:
+                    approx = cv2.approxPolyDP(cnt, 0.75, True)
+                    if len(approx) >= 3:
+                        pts = [f"{pt[0][0]},{pt[0][1]}" for pt in approx]
+                        d = f"M {pts[0]} L " + " ".join(pts[1:]) + " Z"
+                        path_id = f"fill_{idx:03d}_{c_idx}"
+                        fill_paths_xml.append(
+                            f'    <path id="{path_id}" fill="{color}" stroke="none" d="{d}" />'
+                        )
+                        fill_paths_records.append({
+                            "id": path_id,
+                            "fill": color,
+                            "d": d,
+                        })
+
+        line_paths_xml = [
+            f'    <path id="{p.id}" fill="#000000" stroke="none" d="{p.path_data}" />'
             for p in raw_vector.path_records
-        )
+        ]
+
+        # 5. Generate Full SVG Document (Fills Layer + Line Art Layer)
+        fills_xml_str = "\n".join(fill_paths_xml)
+        lines_xml_str = "\n".join(line_paths_xml)
         svg_content = (
             f'<svg xmlns="http://www.w3.org/2000/svg" xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape" '
             f'width="{w}" height="{h}" viewBox="0 0 {w} {h}">\n'
+            f'  <g id="layer_fills" inkscape:groupmode="layer" inkscape:label="Fills">\n'
+            f'{fills_xml_str}\n'
+            f'  </g>\n'
             f'  <g id="layer_line_art" inkscape:groupmode="layer" inkscape:label="Line Art">\n'
-            f'{paths_xml}\n'
+            f'{lines_xml_str}\n'
             f'  </g>\n'
             f'</svg>'
         )
@@ -81,9 +129,34 @@ class ColoringBookPipeline:
         with open(resolved_output, "w", encoding="utf-8") as f:
             f.write(svg_content)
 
-        # 5. Canvas Injection & Viewport Normalization
+        # 6. Canvas Injection & Viewport Normalization
         if inject_to_inkscape and backend is not None and hasattr(backend, "execute_operation"):
-            layer_payload = {
+            # Inject Fills Layer first (underneath)
+            if fill_paths_records:
+                fills_payload = {
+                    "tag": "g",
+                    "attributes": {
+                        "id": "layer_fills",
+                        "inkscape:groupmode": "layer",
+                        "inkscape:label": "Fills",
+                    },
+                    "children": [
+                        {
+                            "tag": "path",
+                            "attributes": {
+                                "id": p["id"],
+                                "fill": p["fill"],
+                                "stroke": "none",
+                                "d": p["d"],
+                            },
+                        }
+                        for p in fill_paths_records
+                    ],
+                }
+                backend.execute_operation(fills_payload)
+
+            # Inject Line Art Layer second (on top)
+            lines_payload = {
                 "tag": "g",
                 "attributes": {
                     "id": "layer_line_art",
@@ -96,13 +169,14 @@ class ColoringBookPipeline:
                         "attributes": {
                             "id": p.id,
                             "fill": "#000000",
+                            "stroke": "none",
                             "d": p.path_data,
                         },
                     }
                     for p in raw_vector.path_records
                 ],
             }
-            backend.execute_operation(layer_payload)
+            backend.execute_operation(lines_payload)
 
             try:
                 import subprocess
@@ -117,26 +191,21 @@ class ColoringBookPipeline:
             except Exception:
                 pass
 
-        # 6. Extract Regions & Build Click Commands
-        regions = self._topology.extract_fill_regions(bin_outline, min_area=min_region_area)
-        commands = []
-        for r in regions:
-            color = inventory.get_color_at(r.u, r.v)
-            commands.append((color, r.u, r.v))
-
-        # 7. Live Desktop Win32 Paint Bucket Automation
+        # 7. Live Desktop Win32 Paint Bucket Automation (Optional tool trigger)
         auto_result = {"status": "skipped", "clicks_dispatched": 0}
         if inject_to_inkscape and self._automator.is_available():
             auto_result = self._automator.execute_sequence(
                 commands, click_delay_ms=click_delay_ms, backend=backend
             )
 
+        total_nodes = sum(len(p.path_data.split()) for p in raw_vector.path_records) + sum(len(p["d"].split()) for p in fill_paths_records)
+
         return create_success_response(
             "Coloring book vectorization and fill sequence complete",
             output_path=resolved_output,
             regions_detected=len(regions),
             palette=inventory.get_palette(),
-            total_nodes=sum(len(p.path_data.split()) for p in raw_vector.path_records),
-            layer_count=1,
+            total_nodes=total_nodes,
+            layer_count=2,
             automation=auto_result,
         )
