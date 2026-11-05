@@ -2,6 +2,13 @@
 
 > **CRITICAL RULE:** All new entries MUST be prepended directly below this block. When an agent wakes up, it reads the top entry. When it sleeps, it writes the top entry.
 
+## 2026-11-05 16:02 | Antigravity (IDE) | [inkmcp] Dependency Stack Upgrade, Local MCP Server Refresh & Governance Invariant Sync
+**Scope**: pyproject.toml, inkmcp/requirements.txt, .agents/INFRASTRUCTURE_INVARIANTS.md, .agents/.manifest_hash, Inkscape extension deployment
+- **Key Outcomes**:
+  - Upgraded Python dependency stack (mcp 1.30.0, numpy 2.5.4, Pillow 13.0.0, scipy 1.18.1, scikit-learn 1.9.1, shapely 2.2.0, pytest 9.2.0, lxml 5.4.0); verified 331/331 pytest pass, 0 ruff/mypy errors, and clean CVE manifest scan (f0f00169...); updated local editable MCP server and deployed Inkscape extension; synced global Invariants 50 and 65-69 into local .agents/INFRASTRUCTURE_INVARIANTS.md.
+  - **Repo & Hygiene Telemetry**: branch `windows-mcp` (github_synced) | hygiene `0 secrets, 0 scratch`
+- **Next-Session Handoff Notes**: Active branch windows-mcp is 100% synced with origin/windows-mcp and all 331 tests pass; optional follow-up if desired is merging windows-mcp into main.
+
 ## 2026-10-13 19:10 | Antigravity (IDE) | [inkmcp] 4-Phase Coloring Book Vectorization Pipeline & Zero-Tolerance Deep Code Audit (129/129 Remediated, 331 Tests Green)
 **Agent**: Antigravity (IDE) / Orchestrator & Multi-Agent Audit Committee
 **Host OS**: Windows (pwsh, Python 3.13.15, Inkscape 1.4.4)
