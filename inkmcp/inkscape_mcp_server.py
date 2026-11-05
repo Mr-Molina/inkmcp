@@ -7,17 +7,42 @@ Provides access to Inkscape operations through a unified tool interface
 for SVG element creation, document manipulation, and code execution.
 """
 
-import json
+import asyncio
+import concurrent.futures
 import logging
 import os
-import subprocess
 import tempfile
+import threading
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, AsyncIterator, Dict, Optional, Union
 
+__all__ = [
+    "DEFAULT_ACTION_NAME",
+    "DEFAULT_DBUS_INTERFACE",
+    "DEFAULT_DBUS_PATH",
+    "DEFAULT_DBUS_SERVICE",
+    "InkscapeConnection",
+    "format_response",
+    "format_vectorize_response",
+    "get_inkscape_connection",
+    "inkscape_operation",
+    "main",
+    "mcp",
+    "server_lifespan",
+    "vectorize_image",
+]
+
 from mcp.server.fastmcp import FastMCP, Context
 from mcp.types import ImageContent
+
+from inkmcp.platform_utils import get_operating_system, is_inkscape_process_running
+from inkmcp.backends import (
+    InkscapeBackend,
+    DBusBackend,
+    HeadlessSvgBackend,
+    WindowsCliBackend,
+)
 
 # Configure logging
 logging.basicConfig(
@@ -33,121 +58,150 @@ DEFAULT_ACTION_NAME = "org.khema.inkscape.mcp"
 
 
 class InkscapeConnection:
-    """Manages D-Bus connection to Inkscape"""
+    """Manages connection to Inkscape with automatic cross-platform backend dispatching."""
 
-    def __init__(self):
+    def __init__(
+        self,
+        backend: Optional[InkscapeBackend] = None,
+        allow_headless: bool = False,
+    ):
         self.dbus_service = DEFAULT_DBUS_SERVICE
         self.dbus_path = DEFAULT_DBUS_PATH
         self.dbus_interface = DEFAULT_DBUS_INTERFACE
         self.action_name = DEFAULT_ACTION_NAME
         self._client_path = Path(__file__).parent / "inkmcpcli.py"
+        self.allow_headless = allow_headless
+        self._custom_backend = backend is not None
+
+        if backend is not None:
+            self.backend: Optional[InkscapeBackend] = backend
+        else:
+            self.backend = self._select_backend(allow_headless=allow_headless)
+
+    def _select_backend(self, allow_headless: bool = False) -> Optional[InkscapeBackend]:
+        """Automatically select backend based on platform and availability."""
+        os_name = get_operating_system()
+        if os_name == "windows":
+            if is_inkscape_process_running():
+                cli_backend = WindowsCliBackend()
+                if cli_backend.is_available():
+                    return cli_backend
+            if allow_headless:
+                return HeadlessSvgBackend()
+            return None
+        else:
+            # Linux / Unix / macOS
+            dbus_backend = DBusBackend(
+                dbus_service=self.dbus_service,
+                dbus_path=self.dbus_path,
+                dbus_interface=self.dbus_interface,
+                action_name=self.action_name,
+            )
+            if dbus_backend.is_available():
+                return dbus_backend
+            if allow_headless:
+                return HeadlessSvgBackend()
+            return None
 
     def is_available(self) -> bool:
-        """Check if Inkscape is running and MCP extension is available"""
-        try:
-            cmd = [
-                "gdbus",
-                "call",
-                "--session",
-                "--dest",
-                self.dbus_service,
-                "--object-path",
-                self.dbus_path,
-                "--method",
-                f"{self.dbus_interface}.List",
-            ]
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
+        """Check if selected backend is available, re-probing if currently unavailable."""
+        if not self._custom_backend:
+            if self.backend is None or not self.backend.is_available():
+                self.backend = self._select_backend(allow_headless=self.allow_headless)
 
-            if result.returncode != 0:
-                logger.warning("Inkscape D-Bus service not available")
-                return False
-
-            # Check if our generic MCP extension action is listed
-            output = result.stdout
-            return self.action_name in output
-
-        except Exception as e:
-            logger.error(f"Error checking Inkscape availability: {e}")
+        if self.backend is None:
             return False
+        return self.backend.is_available()
 
     def execute_operation(self, operation_data: Dict[str, Any]) -> Dict[str, Any]:
-        """Execute operation using CLI client"""
-        try:
-            # Write operation data to temporary file
-            params_file = os.path.join(tempfile.gettempdir(), "mcp_params.json")
+        """Execute operation using selected backend, re-probing if currently unavailable."""
+        if not self._custom_backend:
+            if self.backend is None or not self.backend.is_available():
+                self.backend = self._select_backend(allow_headless=self.allow_headless)
 
-            with open(params_file, "w") as f:
-                json.dump(operation_data, f)
+        if self.backend is None:
+            return {
+                "status": "error",
+                "data": {
+                    "error": (
+                        "No Inkscape backend available. Ensure Inkscape is running with the "
+                        "generic MCP extension installed, or enable headless mode."
+                    )
+                },
+            }
+        return self.backend.execute_operation(operation_data)
 
-            # Execute via D-Bus
-            cmd = [
-                "gdbus",
-                "call",
-                "--session",
-                "--dest",
-                self.dbus_service,
-                "--object-path",
-                self.dbus_path,
-                "--method",
-                f"{self.dbus_interface}.Activate",
-                self.action_name,
-                "[]",
-                "{}",
-            ]
-
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
-
-            if result.returncode != 0:
-                logger.error(f"D-Bus command failed: {result.stderr}")
-                return {
-                    "status": "error",
-                    "data": {"error": f"D-Bus call failed: {result.stderr}"},
-                }
-
-            # Read response from response file
-            response_file = operation_data.get("response_file")
-            if response_file and os.path.exists(response_file):
-                try:
-                    with open(response_file, "r") as f:
-                        response_data = json.load(f)
-                    os.remove(response_file)  # Clean up
-                    return response_data
-                except Exception as e:
-                    logger.error(f"Failed to read response file: {e}")
-                    return {
-                        "status": "error",
-                        "data": {"error": f"Response file error: {e}"},
-                    }
-            else:
-                # Assume success if no response file specified
-                return {"status": "success", "data": {"message": "Operation completed"}}
-
-        except subprocess.TimeoutExpired:
-            logger.error("Operation timed out")
-            return {"status": "error", "data": {"error": "Operation timed out"}}
-        except Exception as e:
-            logger.error(f"Operation execution error: {e}")
-            return {"status": "error", "data": {"error": str(e)}}
 
 
 # Global connection instance
 _inkscape_connection: Optional[InkscapeConnection] = None
+_connection_lock = threading.Lock()
+
+# Dedicated thread pool for Inkscape operations (Fix 5: avoid asyncio default pool starvation)
+_inkscape_executor = concurrent.futures.ThreadPoolExecutor(
+    max_workers=4, thread_name_prefix="inkscape"
+)
 
 
-def get_inkscape_connection() -> InkscapeConnection:
+def _get_executor() -> concurrent.futures.ThreadPoolExecutor:
+    """Get or recreate the dedicated ThreadPoolExecutor for Inkscape operations."""
+    global _inkscape_executor
+    if getattr(_inkscape_executor, "_shutdown", False):
+        _inkscape_executor = concurrent.futures.ThreadPoolExecutor(
+            max_workers=4, thread_name_prefix="inkscape"
+        )
+    return _inkscape_executor
+
+
+async def _run_in_inkscape_executor(func, *args):
+    """Run a synchronous callable in the dedicated Inkscape executor, recreating it if shut down."""
+    global _inkscape_executor
+    if getattr(_inkscape_executor, "_shutdown", False):
+        _inkscape_executor = concurrent.futures.ThreadPoolExecutor(
+            max_workers=4, thread_name_prefix="inkscape"
+        )
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(_inkscape_executor, func, *args)
+
+
+def _sanitize_error_message(e: Exception) -> str:
+    """Return a clean error summary that does not leak host paths or internal details."""
+    import re
+
+    msg = str(e).strip()
+    if not msg:
+        return type(e).__name__
+    first_line = msg.splitlines()[0].strip()
+    cleaned = re.sub(r'(?:/[a-zA-Z0-9_\.\-]+){2,}', '[path]', first_line)
+    cleaned = re.sub(r'[a-zA-Z]:\\(?:[a-zA-Z0-9_\.\-]+\\?)+', '[path]', cleaned)
+    return cleaned
+
+
+def get_inkscape_connection(allow_headless: bool = False) -> InkscapeConnection:
     """Get or create Inkscape connection"""
     global _inkscape_connection
 
-    if _inkscape_connection is None:
-        _inkscape_connection = InkscapeConnection()
+    with _connection_lock:
+        if _inkscape_connection is not None and _inkscape_connection.allow_headless != allow_headless:
+            # allow_headless changed — recreate connection
+            _inkscape_connection = InkscapeConnection(allow_headless=allow_headless)
 
-    if not _inkscape_connection.is_available():
-        raise Exception(
-            "Inkscape is not running or generic MCP extension is not available. "
-            "Please start Inkscape and ensure the generic MCP extension is installed."
-        )
+        if _inkscape_connection is None:
+            _inkscape_connection = InkscapeConnection(allow_headless=allow_headless)
 
-    return _inkscape_connection
+        if not _inkscape_connection.is_available():
+            # Re-attempt connection before raising
+            _inkscape_connection = InkscapeConnection(allow_headless=allow_headless)
+            if not _inkscape_connection.is_available():
+                raise Exception(
+                    "Inkscape is not running or generic MCP extension is not available. "
+                    "Please start Inkscape and ensure the generic MCP extension is installed."
+                )
+
+        return _inkscape_connection
 
 
 @asynccontextmanager
@@ -158,10 +212,10 @@ async def server_lifespan(server: FastMCP) -> AsyncIterator[Dict[str, Any]]:
     try:
         # Test connection on startup
         try:
-            get_inkscape_connection()
+            await _run_in_inkscape_executor(get_inkscape_connection)
             logger.info("Successfully connected to Inkscape on startup")
         except Exception as e:
-            logger.warning(f"Could not connect to Inkscape on startup: {e}")
+            logger.warning("Could not connect to Inkscape on startup: %s", e)
             logger.warning(
                 "Make sure Inkscape is running with the generic MCP extension before using tools"
             )
@@ -169,6 +223,10 @@ async def server_lifespan(server: FastMCP) -> AsyncIterator[Dict[str, Any]]:
         yield {}
     finally:
         logger.info("Inkscape MCP server shut down")
+        try:
+            _inkscape_executor.shutdown(wait=False, cancel_futures=True)
+        except Exception as e:
+            logger.debug("Error shutting down inkscape executor: %s", e)
 
 
 # Create the MCP server
@@ -265,7 +323,7 @@ def format_response(result: Dict[str, Any]) -> str:
 
 
 @mcp.tool()
-def inkscape_operation(ctx: Context, command: str) -> Union[str, ImageContent]:
+async def inkscape_operation(ctx: Context, command: str) -> Union[str, ImageContent]:
     """
     Execute any Inkscape operation using the extension system.
 
@@ -362,7 +420,7 @@ def inkscape_operation(ctx: Context, command: str) -> Union[str, ImageContent]:
     """
     response_file = None
     try:
-        connection = get_inkscape_connection()
+        connection = await _run_in_inkscape_executor(get_inkscape_connection)
 
         # Create unique response file for this operation
         response_fd, response_file = tempfile.mkstemp(
@@ -371,17 +429,20 @@ def inkscape_operation(ctx: Context, command: str) -> Union[str, ImageContent]:
         os.close(response_fd)
 
         # Parse the command string using the same logic as our client
-        from inkmcpcli import parse_command_string
+        try:
+            from inkmcp.inkmcpcli import parse_command_string
+        except ImportError:
+            from inkmcpcli import parse_command_string  # type: ignore[no-redef,import-not-found]
 
         parsed_data = parse_command_string(command)
 
         # Add response file to the operation data
         parsed_data["response_file"] = response_file
 
-        logger.info(f"Executing command: {command}")
-        logger.debug(f"Parsed data: {parsed_data}")
+        logger.info("Executing command: %s", command)
+        logger.debug("Parsed data: %s", parsed_data)
 
-        result = connection.execute_operation(parsed_data)
+        result = await _run_in_inkscape_executor(connection.execute_operation, parsed_data)
 
         # Handle image export special case
         if (
@@ -397,15 +458,245 @@ def inkscape_operation(ctx: Context, command: str) -> Union[str, ImageContent]:
         return format_response(result)
 
     except Exception as e:
-        logger.error(f"Error in inkscape_operation: {e}")
-        return f"❌ Operation failed: {str(e)}"
+        logger.error("Error in inkscape_operation: %s", e, exc_info=True)
+        clean_err = _sanitize_error_message(e)
+        return f"❌ Operation failed: {clean_err}"
     finally:
-        # Clean up response file if it exists
-        if response_file and os.path.exists(response_file):
+        # Clean up response file if still present
+        if response_file:
             try:
-                os.remove(response_file)
-            except OSError:
+                temp_dir = os.path.realpath(tempfile.gettempdir())
+                resp_real = os.path.realpath(response_file)
+                if (
+                    os.path.commonpath([temp_dir, resp_real]) == temp_dir
+                    and resp_real != temp_dir
+                ):
+                    try:
+                        os.unlink(response_file)
+                    except FileNotFoundError:
+                        pass
+            except (FileNotFoundError, OSError):
                 pass
+
+
+def format_vectorize_response(result: Dict[str, Any]) -> str:
+    """Format vectorize operation result for clean AI client display."""
+    status = result.get("status", "error")
+    data = result.get("data", {})
+    message = data.get("message", result.get("message", "Vectorization failed"))
+
+    if status == "error":
+        error_details = data.get("error_details", "")
+        if error_details and error_details != message:
+            return f"❌ **Vectorization Failed**: {message}\n\nDetails: {error_details}"
+        return f"❌ **Vectorization Failed**: {message}"
+
+    emoji = "✅" if status == "success" else "⚠️"
+    output_path = data.get("output_path", "")
+    mode = data.get("mode", "")
+    layer_count = data.get("layer_count", 0)
+    total_nodes = data.get("total_nodes", 0)
+    file_size = data.get("file_size", 0)
+    injected = data.get("injected", False)
+    layers = data.get("layers", [])
+
+    lines = [
+        f"{emoji} **{message}**",
+        "",
+        f"- **Output File**: `{output_path}`",
+        f"- **Mode**: `{mode}`",
+        f"- **Layers**: {layer_count}",
+        f"- **Total Nodes**: {total_nodes}",
+        f"- **File Size**: {file_size} bytes",
+        f"- **Injected to Inkscape**: {'Yes' if injected else 'No'}",
+    ]
+
+    if layers:
+        lines.append("")
+        lines.append("### Layer Breakdown")
+        lines.append("| Layer ID | Label | Color | Paths |")
+        lines.append("| :--- | :--- | :--- | :--- |")
+        for layer in layers:
+            lid = layer.get("layer_id", "")
+            lbl = layer.get("label", lid)
+            col = layer.get("color_hex", "")
+            pc = layer.get("path_count", 0)
+            lines.append(f"| `{lid}` | {lbl} | `{col}` | {pc} |")
+
+    return "\n".join(lines)
+
+
+@mcp.tool()
+async def vectorize_image(
+    ctx: Context,
+    image_path: str,
+    mode: str = "cut_ready",
+    num_colors: int = 0,
+    filter_speckle: float = 4.0,
+    smoothness: float = 1.0,
+    color_tolerance: float = 5.0,
+    inject_to_inkscape: bool = True,
+    output_path: Optional[str] = None,
+    denoise: bool = True,
+    remove_background: bool = False,
+    corner_threshold: Optional[int] = None,
+    segment_length: Optional[float] = None,
+    engine: Optional[str] = None,
+    flatten: str = "auto",
+) -> str:
+    """Vectorize a raster image into a structured SVG document.
+
+    Converts flat raster images (PNG, JPG, BMP, WEBP, etc.) into clean,
+    scalable vector graphics with layered topology suitable for cutting or printing.
+
+    Parameters:
+    - image_path: Path to the raster image file.
+    - mode: Conversion geometry mode:
+        * 'cut_ready': Planar mosaic, zero overlap boolean-subtracted contours with undercuts removed.
+                       Optimized for vinyl cutters, laser cutters, plotters, and CNC.
+        * 'layered': Laser mandala with baseplate; stacked shapes with undercuts preserved.
+                     Optimized for screen printing, illustration, and digital art.
+        * 'silhouette': Crisp single-layer decal; unified contour with compound hole preservation.
+                        Optimized for single-color cut vinyl decals, stamps, and laser engraving.
+        * 'coloring_book': Line art vectorization with interactive flood filling.
+                           Optimized for coloring pages, line drawings, and paint bucket fills.
+    - num_colors: Color count (2..32). 0 (default) = auto-detect the artwork's palette
+                  (planar engine); the vtracer engine falls back to 8.
+    - engine: 'planar' (default for cut_ready) builds a shared-boundary planar mosaic: each
+              border between two colors is fitted once and shared, so there are no gaps,
+              slivers, or wobbly outlines. 'vtracer' = legacy per-region tracer.
+    - flatten: Planar engine only. 'auto' (default) detects painted/gradient artwork and
+               flattens shading into flat color regions before tracing (flat art is left
+               untouched). 'true' forces flattening, 'false' disables it.
+    - filter_speckle: Minimum speckle cutoff area in square pixels (default: 4.0).
+    - smoothness: Curve smoothing multiplier (default: 1.0; higher = smoother curves).
+    - color_tolerance: CIELAB Delta E threshold to merge near-identical colors (default: 5.0; 0 to disable).
+    - inject_to_inkscape: If True, injects vectorized layers directly into active Inkscape canvas.
+                          If False or if GUI is offline, exports directly to SVG file.
+    - output_path: Optional explicit file path to save the optimized SVG.
+                   If not specified, a temporary file path is generated.
+    - denoise: Whether to apply bilateral filter denoising before quantization (default: True).
+    - remove_background: Whether to remove dominant uniform background color (default: False).
+    - corner_threshold: Optional threshold angle for corner detection (e.g. 25-30 for sharp corners).
+    - segment_length: Optional curve fitting segment length threshold (default: 2.0).
+
+    Returns:
+        Markdown-formatted summary including status emoji, file path, layer breakdown,
+        node count, and injection status.
+    """
+    valid_modes = ("cut_ready", "layered", "silhouette", "coloring_book")
+    if mode not in valid_modes:
+        return f"❌ **Vectorization Failed**: Unsupported mode: '{mode}'. Must be 'cut_ready', 'layered', 'silhouette', or 'coloring_book'"
+
+    # SEC-011: Validate image_path exists and reject symlinks
+    raw_img = Path(image_path)
+    try:
+        if raw_img.is_symlink():
+            return f"❌ **Vectorization Failed**: Symlinks are not permitted for image_path: {image_path}"
+        resolved_img = raw_img.resolve()
+        if resolved_img.is_symlink():
+            return f"❌ **Vectorization Failed**: Symlinks are not permitted for image_path: {image_path}"
+        image_exists = resolved_img.is_file()
+    except Exception:
+        image_exists = False
+
+    if not image_exists:
+        return f"❌ **Vectorization Failed**: Image file not found: {image_path}"
+
+    allow_external = os.environ.get("INKMCP_ALLOW_EXTERNAL_PATHS") == "1"
+
+    # Enforce workspace/tempdir boundary validation on image_path
+    if not allow_external:
+        try:
+            temp_root = Path(tempfile.gettempdir()).resolve()
+            cwd_root = Path.cwd().resolve()
+            is_img_safe = (
+                resolved_img.is_relative_to(temp_root)
+                or resolved_img.is_relative_to(cwd_root)
+            )
+        except Exception:
+            is_img_safe = False
+
+        if not is_img_safe:
+            return (
+                f"❌ **Vectorization Failed**: Image path '{image_path}' must reside within "
+                "the workspace directory or system temporary directory."
+            )
+
+    # SEC-011: Validate output_path resides within workspace or temp_dir unless external paths are allowed
+    if output_path and str(output_path).strip():
+        if not allow_external:
+            try:
+                raw_out = Path(output_path)
+                if raw_out.is_symlink():
+                    return f"❌ **Vectorization Failed**: Symlinks are not permitted for output_path: {output_path}"
+                resolved_out = raw_out.resolve()
+                temp_root = Path(tempfile.gettempdir()).resolve()
+                cwd_root = Path.cwd().resolve()
+                img_parent = resolved_img.parent
+                is_safe = (
+                    resolved_out.is_relative_to(temp_root)
+                    or resolved_out.is_relative_to(cwd_root)
+                    or (
+                        (img_parent.is_relative_to(temp_root) or img_parent.is_relative_to(cwd_root))
+                        and resolved_out.is_relative_to(img_parent)
+                    )
+                )
+            except Exception:
+                is_safe = False
+
+            if not is_safe:
+                return (
+                    f"❌ **Vectorization Failed**: Output path '{output_path}' must reside within "
+                    "the workspace directory or system temporary directory."
+                )
+
+    backend = None
+    if inject_to_inkscape:
+        try:
+            connection = await _run_in_inkscape_executor(get_inkscape_connection)
+            backend = connection.backend if connection else None
+        except Exception as e:
+            logger.info("Inkscape connection not available for live injection: %s", e)
+            backend = None
+
+    params = {
+        "image_path": image_path,
+        "mode": mode,
+        "num_colors": num_colors,
+        "filter_speckle": filter_speckle,
+        "smoothness": smoothness,
+        "color_tolerance": color_tolerance,
+        "inject_to_inkscape": inject_to_inkscape,
+        "output_path": output_path,
+        "denoise": denoise,
+        "remove_background": remove_background,
+    }
+    if engine:
+        params["engine"] = engine
+    if flatten is not None:
+        params["flatten"] = flatten
+    if corner_threshold is not None:
+        params["corner_threshold"] = corner_threshold
+    if segment_length is not None:
+        params["segment_length"] = segment_length
+
+    try:
+        from inkmcp.inkmcpops import vectorize_image_operation
+    except ImportError:
+        from inkmcpops import vectorize_image_operation  # type: ignore[no-redef,import-not-found]
+
+    try:
+        result = await _run_in_inkscape_executor(
+            vectorize_image_operation,
+            params,
+            backend,
+        )
+        return format_vectorize_response(result)
+    except Exception as e:
+        logger.error("Error in vectorize_image: %s", e, exc_info=True)
+        clean_err = _sanitize_error_message(e)
+        return f"❌ **Vectorization Failed**: {clean_err}"
 
 
 def main():

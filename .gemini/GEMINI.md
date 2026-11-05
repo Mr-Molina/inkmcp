@@ -8,11 +8,15 @@
 - **Inkscape Extension (`inkscape_mcp.py`, `inkscape_mcp.inx`)**:
   - Inkscape extension responding to D-Bus signals and method calls under `org.inkscape.Inkscape`.
 - **FastMCP Server (`inkmcp/inkscape_mcp_server.py`)**:
-  - Exposes MCP tools (`inkscape_operation`) for shape creation, style manipulation, layer management, code execution, and viewport exports.
+  - Exposes MCP tools (`inkscape_operation`, `vectorize_image`) for shape creation, style manipulation, layer management, code execution, viewport exports, and multi-mode raster-to-SVG vectorization.
 - **CLI Client (`inkmcp/inkmcpcli.py`)**:
-  - Direct execution harness and hybrid code executor (`execute-hybrid`) that handles `# @local` and `# @inkscape` block switching with bidirectional state sharing.
+  - Direct execution harness and hybrid code executor (`execute-hybrid`) that handles `# @local` and `# @inkscape` block switching with bidirectional state sharing, plus vectorization CLI commands (`vectorize-image`, `vectorize-coloring-book`).
 - **Modular SVG Operations (`inkmcp/inkmcpops/`)**:
-  - Individual operation implementations (`circle`, `rect`, `path`, `linearGradient`, `execute-code`, `get-info`, etc.).
+  - Individual operation implementations (`circle`, `rect`, `path`, `linearGradient`, `execute-code`, `get-info`, `vectorize_operations.py`, etc.).
+- **Vectorizer & Coloring Book Pipeline (`inkmcp/vectorizer/`)**:
+  - Multi-stage vectorization engine (`pipeline.py`, `core.py`, `planar_tracer.py`) and 4-Phase Coloring Book Vectorization Pipeline (`coloring_book_pipeline.py`, `color_inventory.py`, `outline_generator.py`, `region_topology.py`) with high-fidelity `trace_planar` + `VTracerCore` fallback.
+- **Backends & Desktop Automation (`inkmcp/backends/`)**:
+  - Cross-platform execution backends (`windows_cli.py`, `dbus.py`, `headless.py`) and Win32 live Paint Bucket automation (`desktop_automator.py`).
 - **Blender Integration (`blender_addon_inkscape_hybrid.py`, `blender_inkscape_hybrid.py`)**:
   - Add-on bridging Blender Bezier curves, meshes, and animation frames into live Inkscape vector art.
 

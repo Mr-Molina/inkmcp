@@ -13,12 +13,92 @@ A Model Context Protocol (MCP) server that enables live control of Inkscape thro
 
 ## Platform Support
 
-- **⚠️ Currently Linux Only** - Uses D-Bus which is Linux-specific
-- **🔮 Future**: Cross-platform support possible via TCP sockets/named pipes
+- **🪟 Windows**: Native support via `inkscape.com -q --actions` active-window IPC and `%APPDATA%\inkscape\extensions` extension integration.
+- **🐧 Linux**: D-Bus session communication with running Inkscape GUI instances.
+- **⚡ Headless Fallback**: Pure headless inkex SVG generation when no GUI instance is running on either platform.
 
 ## Quick Start
 
-### 1. Installation (Linux Only)
+### Windows Setup
+
+#### 1. Prerequisites
+- Inkscape 1.2+ installed (default path `C:\Program Files\Inkscape\bin\inkscape.com` or on `PATH`).
+- Python 3.10+ installed and accessible on `PATH`.
+
+#### 2. Install Extension
+Run the PowerShell installer script from the repository root:
+```powershell
+.\install_extension.ps1
+```
+To verify the extension installation status without modifying files:
+```powershell
+.\install_extension.ps1 -Check
+```
+
+#### 3. Launch Server
+You can launch the server using the PowerShell or Batch wrapper:
+```powershell
+# Via PowerShell
+.\inkmcp\run_inkscape_mcp.ps1
+```
+```cmd
+:: Via Command Prompt / Batch
+inkmcp\run_inkscape_mcp.bat
+```
+The launcher will automatically create a Python virtual environment in `inkmcp\venv\`, install required dependencies from `requirements.txt`, and start the MCP server while keeping stdout clean for JSON-RPC communication.
+
+#### 4. Connect with AI Tools
+
+##### Anthropic Claude Desktop on Windows
+Add to `%APPDATA%\Claude\claude_desktop_config.json`:
+```json
+{
+  "mcpServers": {
+    "inkscape": {
+      "command": "cmd.exe",
+      "args": [
+        "/c",
+        "C:\\path\\to\\inkmcp\\inkmcp\\run_inkscape_mcp.bat"
+      ]
+    }
+  }
+}
+```
+Or using PowerShell:
+```json
+{
+  "mcpServers": {
+    "inkscape": {
+      "command": "powershell.exe",
+      "args": [
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        "C:\\path\\to\\inkmcp\\inkmcp\\run_inkscape_mcp.ps1"
+      ]
+    }
+  }
+}
+```
+
+##### Claude Code on Windows
+```json
+{
+  "mcpServers": {
+    "inkscape": {
+      "command": "python",
+      "args": [
+        "-m",
+        "inkmcp.inkscape_mcp_server"
+      ]
+    }
+  }
+}
+```
+
+### Linux Setup
+
+#### 1. Installation
 
 1. Go to the [Releases page](https://github.com/Shriinivas/inkmcp/releases)
 2. Download `inkmcp-extension.zip` from the latest release
@@ -28,27 +108,24 @@ A Model Context Protocol (MCP) server that enables live control of Inkscape thro
    unzip ~/Downloads/inkmcp-extension.zip
    ```
 
-
-### 2. Make Scripts Executable
+#### 2. Make Scripts Executable
 
 ```bash
 cd ~/.config/inkscape/extensions/inkmcp
 chmod +x run_inkscape_mcp.sh inkmcpcli.py inkscape_mcp_server.py main.py
 ```
 
-### 3. Start Inkscape
-Launch Inkscape normally - the extension is hidden from the menu and only accessible via D-Bus.
+#### 3. Start Inkscape
+Launch Inkscape normally - the extension is accessible via D-Bus on Linux.
 
-### 4. Connect with AI Tools
+#### 4. Connect with AI Tools
 
 **Auto-Setup**: The first time an AI client connects, it will automatically:
 - Create Python virtual environment in `~/.config/inkscape/extensions/inkmcp/venv/`
 - Install all required dependencies from `requirements.txt`
 - Start the MCP server
 
-No manual setup required!
-
-#### Claude Code
+##### Claude Code
 Edit your Claude configuration file:
 ```bash
 # ~/.claude/claude-config.json
@@ -63,7 +140,7 @@ Edit your Claude configuration file:
 }
 ```
 
-#### Anthropic Claude Desktop
+##### Anthropic Claude Desktop
 Update Claude desktop app settings:
 ```json
 {
@@ -75,7 +152,7 @@ Update Claude desktop app settings:
 }
 ```
 
-#### Google Gemini/Codex
+##### Google Gemini/Codex
 For Gemini, edit settings file:
 ```bash
 # ~/.gemini/settings.json

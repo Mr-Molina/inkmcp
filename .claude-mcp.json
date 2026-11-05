@@ -1,12 +1,42 @@
 {
-  "servers": {
-    "inkscape-mcp": {
+  "mcpServers": {
+    "inkscape": {
+      "command": "python",
+      "args": [
+        "-m",
+        "inkmcp.inkscape_mcp_server"
+      ]
+    },
+    "inkscape-windows-bat": {
+      "command": "cmd.exe",
+      "args": [
+        "/c",
+        "inkmcp/run_inkscape_mcp.bat"
+      ]
+    },
+    "inkscape-windows-ps1": {
+      "command": "powershell.exe",
+      "args": [
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        "inkmcp/run_inkscape_mcp.ps1"
+      ]
+    },
+    "inkscape-unix": {
       "command": "bash",
       "args": [
-        "-c",
-        "source global3.13/bin/activate && python -m inkscape_mcp.server"
-      ],
-      "cwd": "/home/khemadeva/hari/dev/code/localgits/aiassisted/inkmcp"
+        "inkmcp/run_inkscape_mcp.sh"
+      ]
+    }
+  },
+  "servers": {
+    "inkscape-mcp": {
+      "command": "python",
+      "args": [
+        "-m",
+        "inkmcp.inkscape_mcp_server"
+      ]
     }
   }
 }

@@ -1,0 +1,46 @@
+[build-system]
+requires = ["setuptools>=70.0.0,<90.0.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "inkmcp"
+version = "0.1.0"
+description = "Model Context Protocol (MCP) server for Inkscape vector graphics"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "mcp>=1.28.1,<2.0.0",
+    "inkex>=1.4.1,<2.0.0",
+    "defusedxml>=0.7.1",
+    "lxml>=5.3.0,<6.0.0",
+    "numpy>=1.24.0",
+    "opencv-python-headless>=4.8.0",
+    "Pillow>=9.0.0",
+    "scipy>=1.10.0",
+    "scikit-learn>=1.2.0",
+    "shapely>=2.0.0",
+    "networkx>=3.0",
+    "vtracer>=0.6.0",
+    "scour>=0.37.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=9.0.3,<10.0.0",
+]
+
+[project.scripts]
+inkmcp = "inkmcp.inkscape_mcp_server:main"
+
+[tool.setuptools]
+include-package-data = true
+py-modules = ["inkscape_mcp"]
+packages = [
+    "inkmcp",
+    "inkmcp.backends",
+    "inkmcp.inkmcpops",
+    "inkmcp.vectorizer",
+]
+
+[tool.mypy]
+ignore_missing_imports = true

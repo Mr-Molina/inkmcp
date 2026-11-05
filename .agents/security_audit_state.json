@@ -1,0 +1,20 @@
+{
+  "workspace": "/home/console-admin/Github/inkmcp",
+  "manifests_detected": {
+    "cargo": [],
+    "npm": [],
+    "python": [
+      "/home/console-admin/Github/inkmcp/pyproject.toml"
+    ]
+  },
+  "scans": {
+    "pip_audit": {
+      "tool": "pip-audit",
+      "status": "not_installed",
+      "findings_count": 0,
+      "details": "pip-audit is not installed or not in PATH"
+    }
+  },
+  "timestamp": 1793842276.9374604,
+  "status": "success"
+}

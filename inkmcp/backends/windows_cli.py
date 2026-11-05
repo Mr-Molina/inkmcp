@@ -1,0 +1,400 @@
+"""
+Windows CLI Active Window Backend for inkmcp
+Executes extension actions against running Inkscape GUI instances on Windows via inkscape.com.
+"""
+
+import json
+import logging
+import os
+import re
+import stat
+import subprocess
+import tempfile
+import time
+from pathlib import Path
+from typing import Any, Dict, Optional
+
+from inkmcp.backends.base import InkscapeBackend
+from inkmcp.platform_utils import (
+    find_inkscape_executable,
+    get_operating_system,
+    is_extension_installed,
+)
+
+try:
+    import msvcrt
+except ImportError:
+    msvcrt = None  # type: ignore[assignment]
+
+logger = logging.getLogger("InkscapeMCP.Backend.WindowsCLI")
+
+ACTION_NOPREFS = "org.khema.inkscape.mcp.noprefs"
+ACTION_NAME_PATTERN = re.compile(r"^[a-zA-Z0-9._-]+$")
+
+
+class _ActionLock:
+    """Exclusive file lock to serialize in-flight Windows CLI operations and prevent mcp_params.json collisions.
+
+    On Windows, uses msvcrt.locking for kernel-level byte locking, which automatically
+    releases if the process crashes or terminates. On non-Windows platforms or when msvcrt
+    is unavailable, falls back to atomic file creation via os.O_CREAT | os.O_EXCL.
+    """
+
+    def __init__(
+        self,
+        lock_path: Optional[str] = None,
+        timeout: float = 35.0,
+        poll_interval: float = 0.05,
+    ):
+        self.lock_path = lock_path or os.path.join(
+            tempfile.gettempdir(), "inkmcp_action.lock"
+        )
+        self.timeout = timeout
+        self.poll_interval = poll_interval
+        self._fd: Optional[int] = None
+        self._acquired = False
+
+    def acquire(self) -> bool:
+        """Acquire the exclusive lock within the configured timeout.
+
+        Raises:
+            TimeoutError: If the lock cannot be acquired before timeout expires.
+        """
+        if self._acquired:
+            return True
+
+        start_time = time.monotonic()
+        while True:
+            if msvcrt is not None:
+                try:
+                    fd = os.open(self.lock_path, os.O_CREAT | os.O_RDWR)
+                    try:
+                        os.lseek(fd, 0, os.SEEK_SET)
+                        msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+                        self._fd = fd
+                        self._acquired = True
+                        return True
+                    except (OSError, PermissionError):
+                        os.close(fd)
+                except OSError:
+                    pass
+            else:
+                try:
+                    fd = os.open(self.lock_path, os.O_CREAT | os.O_EXCL | os.O_RDWR)
+                    self._fd = fd
+                    self._acquired = True
+                    return True
+                except (OSError, FileExistsError):
+                    try:
+                        stat_res = os.stat(self.lock_path)
+                        if (time.time() - stat_res.st_mtime) > (self.timeout + 10.0):
+                            stale_path = f"{self.lock_path}.stale.{os.getpid()}.{time.time_ns()}"
+                            try:
+                                os.replace(self.lock_path, stale_path)
+                                try:
+                                    os.remove(stale_path)
+                                except OSError:
+                                    pass
+                            except OSError:
+                                pass
+                    except OSError:
+                        pass
+
+            if (time.monotonic() - start_time) >= self.timeout:
+                raise TimeoutError(
+                    f"Timed out after {self.timeout}s waiting to acquire Windows CLI action lock: {self.lock_path}"
+                )
+            time.sleep(self.poll_interval)
+
+    def release(self) -> None:
+        """Release the exclusive lock."""
+        if not self._acquired:
+            return
+        try:
+            if msvcrt is not None and self._fd is not None:
+                try:
+                    os.lseek(self._fd, 0, os.SEEK_SET)
+                    msvcrt.locking(self._fd, msvcrt.LK_UNLCK, 1)
+                except OSError:
+                    pass
+                finally:
+                    os.close(self._fd)
+                    self._fd = None
+            elif self._fd is not None:
+                try:
+                    os.close(self._fd)
+                except OSError:
+                    pass
+                self._fd = None
+                if os.path.exists(self.lock_path):
+                    try:
+                        os.remove(self.lock_path)
+                    except OSError:
+                        pass
+        finally:
+            self._acquired = False
+
+    def __enter__(self):
+        self.acquire()
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.release()
+
+
+class WindowsCliBackend(InkscapeBackend):
+    """Executes Inkscape operations on Windows via inkscape.com -q --actions."""
+
+    def __init__(
+        self,
+        inkscape_path: Optional[Path] = None,
+        lock_path: Optional[str] = None,
+        lock_timeout: float = 35.0,
+        action_name: Optional[str] = None,
+    ):
+        self._inkscape_path = inkscape_path or find_inkscape_executable()
+        self._lock_path = lock_path
+        self._lock_timeout = lock_timeout
+        action = action_name if action_name is not None else ACTION_NOPREFS
+        if not ACTION_NAME_PATTERN.match(action):
+            raise ValueError(f"Invalid action name: {action!r}")
+        self._action_name = action
+        self.action_name = action
+
+    def is_available(self) -> bool:
+        """Check if Windows CLI backend is available on the current system.
+
+        Returns:
+            True if running on Windows, inkscape.com exists, and the MCP extension
+            is installed in %APPDATA%\\inkscape\\extensions; False otherwise.
+        """
+        if get_operating_system() != "windows":
+            return False
+        if not self._inkscape_path or not Path(self._inkscape_path).is_file():
+            logger.warning("WindowsCliBackend: inkscape.com executable not found")
+            return False
+        if not is_extension_installed():
+            logger.warning("WindowsCliBackend: inkmcp extension not installed in %APPDATA%")
+            return False
+        return True
+
+    def get_backend_name(self) -> str:
+        """Return the unique identifier for this backend ('windows_cli')."""
+        return "windows_cli"
+
+    def execute_operation(self, operation_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Execute an Inkscape operation against an active Windows Inkscape session.
+
+        Writes operation data to a temporary parameter file, invokes
+        `inkscape.com -q --actions="org.khema.inkscape.mcp.noprefs"`,
+        validates path containment, reads the structured response file,
+        and safely cleans up temporary files.
+
+        Args:
+            operation_data: Dictionary specifying the operation type and parameters.
+
+        Returns:
+            Dictionary with operation status and response data or error details.
+        """
+        if not self.is_available():
+            return {
+                "status": "error",
+                "data": {
+                    "error": (
+                        "Windows Inkscape backend is unavailable. Ensure Inkscape 1.2+ is installed, "
+                        "the MCP extension is installed in %APPDATA%\\inkscape\\extensions, "
+                        "and inkscape.com is accessible."
+                    )
+                },
+            }
+
+        action = operation_data.get("action_name") or operation_data.get("action") or self.action_name
+        if not isinstance(action, str) or not ACTION_NAME_PATTERN.match(action):
+            logger.error("Invalid action name: %r", action)
+            return {
+                "status": "error",
+                "data": {"error": f"Invalid action name: {action!r}"},
+            }
+
+        response_file = operation_data.get("response_file")
+        params_file = None
+        created_temp_response = False
+        is_safe = False
+
+        try:
+            with _ActionLock(lock_path=self._lock_path, timeout=self._lock_timeout):
+                try:
+                    # 1. Prepare unique response file if not provided
+                    if not response_file:
+                        resp_fd, response_file = tempfile.mkstemp(
+                            suffix=".json", prefix="inkmcp_response_"
+                        )
+                        os.close(resp_fd)
+                        created_temp_response = True
+
+                    # Validate response_file containment inside temp_dir BEFORE execution (SEC-033 / WIN-002)
+                    temp_dir_path = Path(tempfile.gettempdir()).resolve()
+                    try:
+                        resp_obj = Path(response_file)
+                        resp_path = resp_obj.resolve()
+                        is_safe = (
+                            resp_path.is_relative_to(temp_dir_path)
+                            and resp_path != temp_dir_path
+                            and resp_path.suffix.lower() == ".json"
+                            and not os.path.islink(response_file)
+                        )
+                    except (ValueError, TypeError, Exception):
+                        is_safe = False
+
+                    if not is_safe:
+                        logger.error("Response file path outside temp directory: %s", response_file)
+                        return {
+                            "status": "error",
+                            "data": {
+                                "error": f"Response file error: Path outside temp directory: {response_file}"
+                            },
+                        }
+
+                    payload = dict(operation_data)
+                    payload["response_file"] = response_file
+
+                    # 2. Write parameter file (canonical path expected by noprefs action)
+                    params_file = os.path.join(tempfile.gettempdir(), "mcp_params.json")
+                    if os.path.islink(params_file):
+                        try:
+                            os.unlink(params_file)
+                        except OSError:
+                            pass
+
+                    flags = os.O_CREAT | os.O_WRONLY | os.O_TRUNC
+                    if hasattr(os, "O_NOFOLLOW"):
+                        flags |= os.O_NOFOLLOW
+
+                    p_fd = os.open(params_file, flags, 0o600)
+                    opened_file = False
+                    try:
+                        st = os.fstat(p_fd)
+                        if not stat.S_ISREG(st.st_mode):
+                            raise OSError(f"Parameters file {params_file} is not a regular file")
+                        with open(p_fd, "w", encoding="utf-8") as pf:
+                            opened_file = True
+                            json.dump(payload, pf)
+                    except Exception:
+                        if not opened_file:
+                            try:
+                                os.close(p_fd)
+                            except OSError:
+                                pass
+                        raise
+
+                    # 3. Invoke Inkscape action via console binary
+                    # -q / --active-window directs action to existing running window
+                    cmd = [
+                        str(self._inkscape_path),
+                        "-q",
+                        f"--actions={action}",
+                    ]
+
+                    try:
+                        result = subprocess.run(
+                            cmd,
+                            capture_output=True,
+                            text=True,
+                            timeout=30,
+                            check=False,
+                        )
+                    except TypeError as te:
+                        if "unexpected keyword argument 'check'" in str(te):
+                            result = subprocess.run(
+                                cmd,
+                                capture_output=True,
+                                text=True,
+                                timeout=30,
+                            )
+                        else:
+                            raise
+                    if result.returncode != 0:
+                        err_msg = (result.stderr or "").strip() or (result.stdout or "").strip()
+                        logger.error(
+                            "Inkscape command failed with code %d: %s",
+                            result.returncode,
+                            err_msg,
+                        )
+                        return {
+                            "status": "error",
+                            "data": {
+                                "error": f"Inkscape action execution failed (code {result.returncode}): {err_msg}"
+                            },
+                        }
+
+                    stdout_str = (result.stdout or "").strip()
+                    if "No active desktop to run" in stdout_str:
+                        return {
+                            "status": "error",
+                            "data": {
+                                "error": "Inkscape is running, but no active document is open. Please open or create a document in Inkscape."
+                            },
+                        }
+
+                    # 4. Read response from response file
+                    resp_real = str(Path(response_file).resolve())
+                    if (
+                        os.path.islink(response_file)
+                        or not os.path.exists(resp_real)
+                        or not stat.S_ISREG(os.stat(resp_real).st_mode)
+                        or os.path.getsize(resp_real) == 0
+                    ):
+                        return {
+                            "status": "error",
+                            "data": {
+                                "error": "Inkscape extension executed but produced no response file."
+                            },
+                        }
+
+                    with open(resp_real, "r", encoding="utf-8") as rf:
+                        return json.load(rf)
+                finally:
+                    if (
+                        response_file
+                        and (is_safe or created_temp_response)
+                        and not os.path.islink(response_file)
+                        and os.path.exists(response_file)
+                    ):
+                        try:
+                            os.remove(response_file)
+                        except OSError:
+                            pass
+                    if params_file and (os.path.exists(params_file) or os.path.islink(params_file)):
+                        try:
+                            if os.path.islink(params_file):
+                                os.unlink(params_file)
+                            else:
+                                os.remove(params_file)
+                        except OSError:
+                            pass
+
+        except subprocess.TimeoutExpired:
+            logger.error("Inkscape CLI action timed out")
+            return {
+                "status": "error",
+                "data": {"error": "Inkscape action execution timed out (30s)"},
+            }
+        except TimeoutError as te:
+            logger.error("Windows CLI action lock timed out: %s", te)
+            return {
+                "status": "error",
+                "data": {"error": f"Windows CLI action lock timed out: {te}"},
+            }
+        except Exception as e:
+            logger.error("Windows CLI execution failed: %s", e)
+            return {"status": "error", "data": {"error": str(e)}}
+
+    async def is_available_async(self) -> bool:
+        """Async-compatible wrapper for is_available to prevent event loop starvation."""
+        import asyncio
+        return await asyncio.to_thread(self.is_available)
+
+    async def execute_operation_async(self, operation_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Async-compatible wrapper for execute_operation to prevent event loop starvation."""
+        import asyncio
+        return await asyncio.to_thread(self.execute_operation, operation_data)

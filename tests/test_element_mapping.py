@@ -98,11 +98,12 @@ class TestGetUniqueId:
         mock_svg.get_unique_id.return_value = "box_1"
 
         reserved = {"box_1", "box_1_1"}
+        original_reserved = set(reserved)
 
         sig = inspect.signature(get_unique_id)
         if "reserved_ids" in sig.parameters:
             unique_id = get_unique_id(mock_svg, "rect", custom_id="box_1", reserved_ids=reserved)
-            assert unique_id not in reserved, f"Generated ID {unique_id} collided with reserved_ids"
+            assert unique_id not in original_reserved, f"Generated ID {unique_id} collided with reserved_ids"
             assert unique_id == "box_1_2"
         else:
             # Document and verify reserved_ids parameter contract

@@ -5,7 +5,6 @@ child DSL quote stripping, JSON children arrays, and strip_python_comments.
 """
 
 import time
-import pytest
 from inkmcp.inkmcpcli import (
     parse_attributes,
     parse_children_array,

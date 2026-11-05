@@ -66,7 +66,7 @@ if __name__ == "__main__":
     execute_hybrid(HYBRID_CODE)
 ```
 
-See `blender_self_executing_example.py` for a complete working example.
+See `examples/blender2inkscape.py` and `examples/inkscape2blender.py` for complete working examples.
 
 ## Magic Comments
 
@@ -84,12 +84,11 @@ Variables flow bidirectionally:
 - Blender → Inkscape: Variables created in `@local` are available in `@inkscape`
 - Inkscape → Blender: Currently output-only (full bidirectional coming soon)
 
-## Example
+## Examples
 
-See `blender_example.py` for a complete example that:
-1. Extracts vertices from a Blender mesh
-2. Creates circles in Inkscape at those positions
-3. Reports back in Blender
+See the `examples/` directory for complete working examples:
+1. `examples/blender2inkscape.py`: Extracts Bezier curves from Blender and generates perspective-correct SVG paths in Inkscape.
+2. `examples/inkscape2blender.py`: Extracts SVG paths and styles from Inkscape and builds native 2D/3D curves and materials in Blender.
 
 ## Limitations
 

@@ -9,6 +9,7 @@ def create_success_response(message: str, **data) -> Dict[str, Any]:
     response_data.update(data)
     return {
         "status": "success",
+        "message": message,
         "data": response_data
     }
 
@@ -19,23 +20,39 @@ def create_error_response(error_message: str, **data) -> Dict[str, Any]:
     response_data.update(data)
     return {
         "status": "error",
+        "message": error_message,
         "data": response_data
     }
 
 
 def get_element_info_data(element) -> Dict[str, Any]:
-    """Extract comprehensive element information"""
+    """Extract comprehensive element information with collision-safe attribute parsing."""
+    tag = element.tag.split('}')[-1] if isinstance(element.tag, str) else "#comment"
     element_info = {
         "id": element.get('id', 'no-id'),
-        "tag": element.tag.split('}')[-1],  # Remove namespace
+        "tag": tag,
         "label": element.get('{http://www.inkscape.org/namespaces/inkscape}label', None),
     }
 
-    # Get all attributes
-    attributes = {}
+    # Get all attributes avoiding collisions when stripping XML namespaces (OPS-007)
+    attributes: Dict[str, Any] = {}
+    raw_keys_for_clean: Dict[str, str] = {}
     for key, value in element.attrib.items():
         clean_key = key.split('}')[-1]  # Remove namespace prefixes
-        attributes[clean_key] = value
+        if clean_key not in attributes:
+            attributes[clean_key] = value
+            raw_keys_for_clean[clean_key] = key
+        else:
+            # Collision detected on clean_key: preserve previous entry under full key if namespaced
+            prev_raw_key = raw_keys_for_clean.get(clean_key)
+            if prev_raw_key and prev_raw_key != clean_key and prev_raw_key not in attributes:
+                attributes[prev_raw_key] = attributes[clean_key]
+            # If current key is bare/clean_key, assign it to clean_key; otherwise assign to full key
+            if key == clean_key:
+                attributes[clean_key] = value
+            else:
+                attributes[key] = value
+            raw_keys_for_clean[clean_key] = key
 
     element_info["attributes"] = attributes
 
@@ -52,3 +69,7 @@ def get_element_info_data(element) -> Dict[str, Any]:
         element_info["style"] = style_info
 
     return element_info
+
+
+# Alias for backwards compatibility and parity (OPS-007)
+serialize_element = get_element_info_data

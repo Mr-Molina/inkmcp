@@ -1,7 +1,7 @@
 {
-  // "typeCheckingMode": "strict",
+  "typeCheckingMode": "standard",
   "reportDeprecated": "warning",
-  "reportMissingImports": "warning",
+  "reportMissingImports": "error",
   "reportUnusedImport": "information",
   "exclude": [
     "**/venv",
@@ -9,8 +9,5 @@
     "**/__pycache__",
     "**/internal"
   ],
-  "extraPaths": [
-    "./inkmcp/venv/lib/python3.13/site-packages",
-    "/usr/share/inkscape/extensions"
-  ]
+  "extraPaths": []
 }

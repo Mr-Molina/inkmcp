@@ -1,10 +1,92 @@
-"""Code execution operations module"""
+"""Code execution operations module
 
+SECURITY_WARNING:
+    This module executes user-supplied Python code with AST-level pattern blocking.
+    The exec() sandbox is NOT a security boundary — it provides defense-in-depth
+    against common escape patterns but cannot prevent all attacks. Access to this
+    tool should be restricted via MCP authentication/authorization.
+"""
+
+import ast
+import builtins
 import io
+import logging
 import traceback
 from contextlib import redirect_stdout, redirect_stderr
-from typing import Dict, Any
+from typing import Dict, Any, List
 from .common import create_success_response, create_error_response
+
+logger = logging.getLogger(__name__)
+
+# --- AST pre-validation guard ---
+
+SAFE_MODULES = frozenset({"math", "random", "re", "json", "inkex", "lxml"})
+
+_DANGEROUS_ATTRIBUTES = frozenset({
+    '__builtins__', '__import__', '__subclasses__', '__globals__',
+    '__class__', '__mro__', '__bases__', '__code__', '__func__',
+    '__dict__', '__closure__', '__annotations__', '__self__',
+    'command', 'os', 'sys', 'popen', 'system', 'call', 'subprocess',
+    'getroottree', 'write', 'tofile',
+    'gi_frame', 'gi_code', 'tb_frame', 'tb_next',
+    'f_globals', 'f_builtins', 'f_locals', 'f_code', 'f_back',
+    'cr_frame', 'cr_code', 'ag_frame', 'ag_code',
+    'format', 'format_map'
+})
+
+_DANGEROUS_NAMES = frozenset({
+    'eval', 'exec', 'compile', '__import__', 'breakpoint',
+    'open', 'os', 'sys', 'getattr', 'setattr', 'delattr',
+    'globals', 'locals', 'vars', 'input'
+})
+
+
+def _validate_code_safety(code: str) -> List[str]:
+    """Parse *code* with :func:`ast.parse` and walk the AST to detect
+    dangerous patterns.
+
+    Returns a list of human-readable violation strings.  An empty list
+    means no violations were detected.
+    """
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        # Let exec() surface the SyntaxError with a proper traceback.
+        return []
+
+    violations: List[str] = []
+
+    for node in ast.walk(tree):
+        # Block non-whitelisted import statements
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                root_module = alias.name.split('.')[0]
+                if root_module not in SAFE_MODULES:
+                    violations.append(f"Import of module '{alias.name}' is not allowed")
+        elif isinstance(node, ast.ImportFrom):
+            root_module = (node.module or '').split('.')[0]
+            if root_module not in SAFE_MODULES:
+                violations.append(f"Import of module '{node.module or ''}' is not allowed")
+
+        # Block dangerous attribute access (e.g. obj.__builtins__, generator.gi_frame)
+        elif isinstance(node, ast.Attribute):
+            if node.attr in _DANGEROUS_ATTRIBUTES or (
+                node.attr.startswith("__") and node.attr not in {"__name__", "__doc__"}
+            ):
+                violations.append(
+                    f"Access to dangerous attribute '{node.attr}' is not allowed"
+                )
+
+        # Block dangerous name references
+        elif isinstance(node, ast.Name):
+            if node.id in _DANGEROUS_NAMES or (
+                node.id.startswith("__") and node.id not in {"__name__", "__doc__"}
+            ):
+                violations.append(
+                    f"Reference to dangerous name '{node.id}' is not allowed"
+                )
+
+    return violations
 
 
 def execute_code(extension_instance, svg, attributes: Dict[str, Any]) -> Dict[str, Any]:
@@ -14,13 +96,46 @@ def execute_code(extension_instance, svg, attributes: Dict[str, Any]) -> Dict[st
         if not code.strip():
             return create_error_response("No code provided")
 
+        # AST pre-validation: block dangerous patterns before exec()
+        violations = _validate_code_safety(code)
+        if violations:
+            return create_error_response(
+                "Code blocked by security validation",
+                violations=violations
+            )
+
         return_output = attributes.get('return_output', True)
 
+        # Safe __import__ wrapper restricting imports to verified safe modules (OPS-002)
+        def _safe_import(name, globals=None, locals=None, fromlist=(), level=0):
+            root = name.split('.')[0]
+            if root not in SAFE_MODULES or level != 0:
+                raise ImportError(f"Import of module '{name}' is not allowed in sandbox")
+            return builtins.__import__(name, globals, locals, fromlist, level)
+
+        # Restrict builtins to safe primitives whitelist
+        safe_builtins = {
+            name: getattr(builtins, name)
+            for name in (
+                "abs", "all", "any", "bool", "dict", "enumerate", "float", "int",
+                "len", "list", "max", "min", "range", "round", "set", "str",
+                "sum", "tuple", "zip", "print",
+                "Exception", "ValueError", "TypeError", "KeyError", "IndexError",
+                "AttributeError", "ArithmeticError", "ZeroDivisionError", "LookupError",
+                "RuntimeError", "isinstance", "issubclass", "repr", "sorted",
+                "reversed", "hasattr"
+            )
+            if hasattr(builtins, name)
+        }
+        safe_builtins["__import__"] = _safe_import
+
         # Set up execution context following inkex patterns
+        # NOTE: 'self' (extension instance) is intentionally excluded —
+        # it exposes .save(), .document file-write access.
         execution_globals = {
-            '__builtins__': __builtins__,
+            '__builtins__': safe_builtins,
+            '__name__': '__main__',
             'svg': svg,
-            'self': extension_instance,  # Reference to extension instance
             'document': svg,  # Alias for convenience
         }
 
@@ -75,13 +190,11 @@ def execute_code(extension_instance, svg, attributes: Dict[str, Any]) -> Dict[st
             import random
             import json
             import re
-            import os
             execution_globals.update({
                 'math': math,
                 'random': random,
                 'json': json,
                 're': re,
-                'os': os,
             })
         except ImportError:
             pass
@@ -95,8 +208,6 @@ def execute_code(extension_instance, svg, attributes: Dict[str, Any]) -> Dict[st
             return None
         
         execution_globals['get_element_by_id'] = get_element_by_id
-
-        execution_locals = {}
 
         # Capture output if requested
         stdout_capture = io.StringIO()
@@ -113,32 +224,77 @@ def execute_code(extension_instance, svg, attributes: Dict[str, Any]) -> Dict[st
 
         # Count elements before execution
         elements_before = len(list(svg.iter()))
+        
+        execution_locals: Dict[str, Any] = {}
+        timeout_seconds = float(attributes.get('timeout', 15.0))
 
         try:
-            if return_output:
-                with redirect_stdout(stdout_capture), redirect_stderr(stderr_capture):
-                    # Execute with same dict for globals and locals to avoid scoping issues
-                    # This ensures imports are accessible in function closures
-                    exec(code, execution_globals, execution_globals)
+            exec_exception = []
+            def _run_exec():
+                try:
+                    if return_output:
+                        with redirect_stdout(stdout_capture), redirect_stderr(stderr_capture):
+                            exec(code, execution_globals, execution_locals)
+                    else:
+                        exec(code, execution_globals, execution_locals)
+                except Exception as e:
+                    exec_exception.append((e, traceback.format_exc()))
+                except (KeyboardInterrupt, SystemExit):
+                    raise
+                except BaseException as e:
+                    logger.warning("Trapped unexpected BaseException in sandbox thread: %s", e)
+                    exec_exception.append((e, traceback.format_exc()))
+            
+            import threading
+            thread = threading.Thread(target=_run_exec, daemon=True)
+            thread.start()
+            thread.join(timeout=timeout_seconds)
+
+            if thread.is_alive():
+                try:
+                    import ctypes
+                    if thread.ident is not None:
+                        res = ctypes.pythonapi.PyThreadState_SetAsyncExc(
+                            ctypes.c_ulong(thread.ident),
+                            ctypes.py_object(SystemExit),
+                        )
+                        if res > 1:
+                            ctypes.pythonapi.PyThreadState_SetAsyncExc(
+                                ctypes.c_ulong(thread.ident),
+                                None,
+                            )
+                except (AttributeError, ValueError, TypeError) as exc:
+                    logger.warning("Failed to signal thread termination: %s", exc)
+                result_data["errors"] = f"Execution error: Timeout after {timeout_seconds} seconds"
+                result_data["execution_successful"] = False
+            elif exec_exception:
+                exc_val, tb = exec_exception[0]
+                result_data["errors"] = f"Execution error: {type(exc_val).__name__}: {str(exc_val)}\n\nTraceback:\n{tb}"
+                result_data["execution_successful"] = False
             else:
-                # Execute without capturing output
-                exec(code, execution_globals, execution_globals)
+                result_data["execution_successful"] = True
 
-            result_data["execution_successful"] = True
-
-            # Capture any return value
-            if 'result' in execution_locals:
-                result_data["return_value"] = str(execution_locals['result'])
+                # Capture any return value
+                if 'result' in execution_locals:
+                    result_data["return_value"] = str(execution_locals['result'])
 
         except Exception as e:
             error_traceback = traceback.format_exc()
+            logger.error("Execution error in execute_code: %s", e)
             result_data["errors"] = f"Execution error: {str(e)}\n\nTraceback:\n{error_traceback}"
             result_data["execution_successful"] = False
 
         # Get captured output
         if return_output:
+            MAX_OUTPUT_BYTES = 64 * 1024
+            
             stdout_content = stdout_capture.getvalue()
+            if len(stdout_content) > MAX_OUTPUT_BYTES:
+                stdout_content = stdout_content[:MAX_OUTPUT_BYTES] + "... [output truncated]"
+            
             stderr_content = stderr_capture.getvalue()
+            if len(stderr_content) > MAX_OUTPUT_BYTES:
+                stderr_content = stderr_content[:MAX_OUTPUT_BYTES] + "... [output truncated]"
 
             if stdout_content:
                 result_data["output"] = stdout_content
@@ -152,32 +308,25 @@ def execute_code(extension_instance, svg, attributes: Dict[str, Any]) -> Dict[st
                 result_data["elements_created"] = [f"{elements_after - elements_before} new elements added"]
 
             # Get element counts by type
-            element_counts = {}
+            element_counts: Dict[str, int] = {}
             for element in svg.iter():
-                tag = element.tag.split('}')[-1] if '}' in element.tag else element.tag
+                tag = element.tag.split('}')[-1] if isinstance(element.tag, str) and '}' in element.tag else str(element.tag)
                 element_counts[tag] = element_counts.get(tag, 0) + 1
 
             result_data["current_element_counts"] = element_counts
             
             # Capture local variables for hybrid execution
             # Serialize variables that were created/modified during execution
-            # Since we use execution_globals for both globals and locals, filter carefully
-            builtin_keys = {'svg', 'self', 'Circle', 'Rectangle', 'Path', 'PathElement', 'Group', 
-                           'get_element_by_id', 'inkex', 'sqrt'}  # Known built-ins and imports
             captured_vars = {}
-            for key, value in execution_globals.items():
+            for key, value in execution_locals.items():
                 # Skip private/magic variables
                 if key.startswith('_'):
-                    continue
-                # Skip known built-ins
-                if key in builtin_keys:
                     continue
                 # Skip modules and non-serializable types
                 if type(value).__name__ in ('module', 'function', 'type', 'builtin_function_or_method'):
                     continue
                 # Try to serialize
                 try:
-                    import json
                     json.dumps(value)  # Test if serializable
                     captured_vars[key] = value
                 except (TypeError, ValueError):
@@ -188,14 +337,19 @@ def execute_code(extension_instance, svg, attributes: Dict[str, Any]) -> Dict[st
                 result_data["local_variables"] = captured_vars
             
         except Exception as e:
+            logger.warning("Failed post-execution element/variable processing: %s", e)
             result_data["element_count_error"] = str(e)
 
         # Determine message based on execution success
         message = "Code executed successfully" if result_data["execution_successful"] else "Code execution failed"
 
+        if not result_data["execution_successful"]:
+            return create_error_response(message, **result_data)
+
         return create_success_response(message, **result_data)
 
     except Exception as e:
+        logger.exception("execute_code operation failure: %s", e)
         return create_error_response(
             f"Failed to execute code: {str(e)}",
             traceback=traceback.format_exc()

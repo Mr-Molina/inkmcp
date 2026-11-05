@@ -22,10 +22,11 @@ def export_to_blender_cleaned():
         }
 
         path_obj = elem.to_path_element()
-        superpath = path_obj.path.to_absolute().to_superpath()
+        transformed_path = path_obj.path.transform(elem.composed_transform())
+        superpath = transformed_path.to_absolute().to_superpath()
 
         # Check if Inkscape path actually ends with 'Z'
-        path_cmds = path_obj.path.to_arrays()
+        path_cmds = transformed_path.to_arrays()
         is_cyclic = len(path_cmds) > 0 and path_cmds[-1][0] == "Z"
 
         for subpath in superpath:
@@ -99,12 +100,15 @@ def create_blender_curves(data):
             mat.use_nodes = True
             mat.blend_method = "BLEND"
             rgba = hex_to_rgb(entry["color"], entry["alpha"])
-            mat.node_tree.nodes.get("Principled BSDF").inputs[
-                "Base Color"
-            ].default_value = rgba
-            mat.node_tree.nodes.get("Principled BSDF").inputs[
-                "Alpha"
-            ].default_value = entry["alpha"]
+            principled = next(
+                (n for n in mat.node_tree.nodes if getattr(n, "type", "") == "BSDF_PRINCIPLED"),
+                None,
+            ) or mat.node_tree.nodes.get("Principled BSDF")
+            if principled:
+                if "Base Color" in principled.inputs:
+                    principled.inputs["Base Color"].default_value = rgba
+                if "Alpha" in principled.inputs:
+                    principled.inputs["Alpha"].default_value = entry["alpha"]
             mat.diffuse_color = rgba
         obj.data.materials.append(mat)
 
@@ -153,8 +157,8 @@ def create_blender_curves(data):
                     p.handle_left_type = "VECTOR"
                     p.handle_right_type = "VECTOR"
                 else:
-                    p.handle_left_type = "ALIGNED"
-                    p.handle_right_type = "ALIGNED"
+                    p.handle_left_type = "FREE"
+                    p.handle_right_type = "FREE"
 
 
 # Import data

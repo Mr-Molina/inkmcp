@@ -4,29 +4,22 @@ Inkscape Extension for dynamic SVG element creation
 Handles any SVG element through dynamic class instantiation
 """
 
-import inkex
+from __future__ import annotations
+
 import json
+import logging
 import os
+import re
+import stat
 import tempfile
-from typing import Dict, Any, List
-from inkmcp.inkmcpops.element_mapping import (
-    get_element_class,
-    should_place_in_defs,
-    ensure_defs_section,
-    get_unique_id,
-)
-from inkmcp.inkmcpops.common import get_element_info_data
-from inkmcp.inkmcpops.export_operations import export_document_image
-from inkmcp.inkmcpops.execute_operations import execute_code
-
-
+from typing import Dict, Any, List, Optional
+import inkex
 class ElementCreator(inkex.EffectExtension):
     """Extension for creating any SVG element dynamically"""
 
     def add_arguments(self, pars):
         """Add command line arguments"""
-        # No parameters needed - use fixed file path like original system
-        pass
+        pars.add_argument("--params-file", type=str, default="")
 
     # def errormsg(self, msg):
     #     """Override errormsg to prevent UI dialogs - silent operation only"""
@@ -44,6 +37,7 @@ class ElementCreator(inkex.EffectExtension):
         element_data: Dict[str, Any],
         id_mapping: Dict[str, str] | None = None,
         generated_ids: List[str] | None = None,
+        _depth: int = 0,
     ) -> inkex.BaseElement:
         """
         Create SVG element recursively with children and track ID mappings
@@ -53,10 +47,14 @@ class ElementCreator(inkex.EffectExtension):
             element_data: Element data with tag, attributes, and children
             id_mapping: Dictionary to collect requested_id -> actual_id mappings
             generated_ids: List to collect auto-generated IDs
+            _depth: Recursion depth counter (maximum 64)
 
         Returns:
             Created SVG element
         """
+        if _depth > 64:
+            raise ValueError(f"Maximum recursion depth exceeded ({_depth} > 64)")
+
         if id_mapping is None:
             id_mapping = {}
         if generated_ids is None:
@@ -74,6 +72,8 @@ class ElementCreator(inkex.EffectExtension):
             element = ElementClass()
         else:
             # Fallback to raw lxml element for unmapped tags (like filter primitives)
+            if not tag or not re.match(r"^[a-zA-Z][a-zA-Z0-9:_-]*$", tag):
+                raise ValueError(f"Invalid fallback tag name: {tag}")
             element = inkex.etree.Element(tag)
 
         # Handle ID parameter - track both requested and generated
@@ -93,21 +93,27 @@ class ElementCreator(inkex.EffectExtension):
 
         # Set all attributes except id (already handled)
         for attr_name, attr_value in attributes.items():
-            if attr_name != "id":
-                attrSet = False
-                if hasattr(element, attr_name):
-                    try:
-                        setattr(element, attr_name, attr_value)
-                        attrSet = True
-                    except Exception as _:
-                        pass
-                if not attrSet:
-                    element.set(attr_name, str(attr_value))
+            if attr_name == "id":
+                continue
+            lower_name = attr_name.lower()
+            if lower_name.startswith("on"):
+                raise ValueError(f"Event attributes are rejected: {attr_name}")
+            val_str = str(attr_value)
+            local_name = lower_name.split("}")[-1] if "}" in lower_name else lower_name
+            if local_name in ("href", "xlink:href") or lower_name in ("href", "xlink:href"):
+                val_lower = val_str.strip().lower()
+                if (
+                    val_lower.startswith("javascript:")
+                    or val_lower.startswith("vbscript:")
+                    or val_lower.startswith("data:text/html")
+                ):
+                    raise ValueError(f"Dangerous URI rejected in attribute {attr_name}: {val_str}")
+            element.set(attr_name, val_str)
 
         # Process children recursively with same tracking lists
         for child_data in children:
             child_element = self.create_element_recursive(
-                svg, child_data, id_mapping, generated_ids
+                svg, child_data, id_mapping, generated_ids, _depth=_depth + 1
             )
             element.append(child_element)
 
@@ -136,8 +142,10 @@ class ElementCreator(inkex.EffectExtension):
                 element_id = attributes.get("id", "")
                 return self.get_element_info(svg, element_id)
             elif action == "export-document-image":
+                from inkmcp.inkmcpops.export_operations import export_document_image
                 return export_document_image(self, svg, attributes)
             elif action == "execute-code":
+                from inkmcp.inkmcpops.execute_operations import execute_code
                 return execute_code(self, svg, attributes)
             else:
                 return {
@@ -184,8 +192,10 @@ class ElementCreator(inkex.EffectExtension):
             height = svg.get("height", "unknown")
 
             # Count elements by type
-            element_counts = {}
+            element_counts: Dict[str, int] = {}
             for elem in svg.iter():
+                if not isinstance(elem.tag, str):
+                    continue
                 tag = elem.tag.split("}")[-1] if "}" in elem.tag else elem.tag
                 element_counts[tag] = element_counts.get(tag, 0) + 1
 
@@ -228,34 +238,115 @@ class ElementCreator(inkex.EffectExtension):
                 "data": {"error": f"Failed to get element info: {str(e)}"},
             }
 
-    def write_response(self, response_data: Dict[str, Any], response_file_path: str):
+    def write_response(
+        self, response_data: Dict[str, Any], response_file_path: Optional[str] = None
+    ):
         """Write response to response file (like original system)"""
+        if not response_file_path:
+            logging.error("Response: %s", response_data)
+            return
+
         try:
-            with open(response_file_path, "w") as f:
-                json.dump(response_data, f)
-        except Exception:
+            real_temp = os.path.realpath(tempfile.gettempdir())
+            real_resp = os.path.realpath(response_file_path)
+            if (
+                os.path.commonpath([real_temp, real_resp]) != real_temp
+                or real_resp == real_temp
+            ):
+                logging.error("Response file outside temp directory: %s", response_file_path)
+                return
+
+            if os.path.islink(response_file_path) or os.path.islink(real_resp):
+                logging.error("Response file is a symlink: %s", response_file_path)
+                return
+
+            flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
+            fd = os.open(real_resp, flags, 0o600)
+            file_obj = None
+            try:
+                file_obj = os.fdopen(fd, "w", encoding="utf-8")
+                json.dump(response_data, file_obj)
+            finally:
+                if file_obj is not None:
+                    file_obj.close()
+                else:
+                    try:
+                        os.close(fd)
+                    except OSError:
+                        pass
+        except Exception as e:
             # Silent failure - avoid any output that could interfere with Inkscape
-            pass
+            logging.warning("Failed to write response file: %s", e)
+
+    def read_params_file(self, params_path: str) -> Dict[str, Any]:
+        """Safely open and read parameters JSON file with TOCTOU, symlink, and ownership checks."""
+        return read_params_file(params_path)
 
     def effect(self):
         """Main extension entry point"""
+        import sys
         element_data = {}  # Initialize to avoid unbound variable
+        params_file = getattr(self.options, "params_file", None)
+        
+        # If no params_file is specified, determine if we are running as an action
+        # Actions receive no custom --params-file argument (though Inkscape may pass --id when elements are selected)
+        default_params_file = os.path.join(tempfile.gettempdir(), "mcp_params.json")
+        has_custom_args = any(arg.startswith("--") for arg in sys.argv[1:])
+        if not params_file:
+            if os.path.exists(default_params_file):
+                params_file = default_params_file
+            elif has_custom_args:
+                error_msg = "No parameters file provided for standalone effect"
+                logging.error(error_msg)
+                self.write_response(
+                    {
+                        "status": "error",
+                        "data": {"error": error_msg},
+                    },
+                    None,
+                )
+                return
+            else:
+                params_file = default_params_file
+
+        temp_dir = os.path.realpath(tempfile.gettempdir())
+        params_real = os.path.realpath(params_file)
+        is_safe = False
         try:
-            # Read JSON data from fixed file path (like original system)
-            params_file = os.path.join(tempfile.gettempdir(), "mcp_params.json")
-            if not os.path.exists(params_file):
+            is_safe = (
+                os.path.commonpath([temp_dir, params_real]) == temp_dir
+                and params_real != temp_dir
+            )
+        except (ValueError, TypeError):
+            is_safe = False
+
+        if not is_safe:
+            error_msg = f"Params file outside temp directory: {params_file}"
+            logging.error(error_msg)
+            self.write_response(
+                {
+                    "status": "error",
+                    "data": {"error": error_msg},
+                },
+                None,
+            )
+            return
+
+        try:
+            if not os.path.exists(params_real):
+                error_msg = "No parameters file found"
+                logging.error(error_msg)
                 response = {
                     "status": "error",
-                    "data": {"error": "No parameters file found"},
+                    "data": {"error": error_msg},
                 }
-                self.write_response(response, "/tmp/error_response.json")
+                self.write_response(
+                    response,
+                    None,
+                )
                 return
 
-            with open(params_file, "r") as f:
-                element_data = json.load(f)
-
-            # Clean up the params file after reading (like original system)
-            os.remove(params_file)
+            element_data = self.read_params_file(params_real)
 
             tag = element_data.get("tag", "")
 
@@ -330,8 +421,52 @@ class ElementCreator(inkex.EffectExtension):
                 response_file = element_data.get("response_file")
                 if response_file:
                     self.write_response(error_response, response_file)
-            except Exception:
-                pass  # Silent error handling
+                else:
+                    logging.error("Extension execution failed: %s", e)
+            except Exception as inner_e:
+                logging.warning("Failed to write error response: %s", inner_e)
+        finally:
+            if params_file and is_safe:
+                try:
+                    os.remove(params_real)
+                except (FileNotFoundError, OSError):
+                    pass
+
+
+def read_params_file(params_path: str) -> Dict[str, Any]:
+    """
+    Safely open and read parameters JSON file with TOCTOU, symlink, and ownership checks.
+    """
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(params_path, flags)
+    file_obj = None
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            raise ValueError(f"Parameters file is not a regular file: {params_path}")
+        if hasattr(os, "getuid") and st.st_uid != os.getuid():
+            raise PermissionError(
+                f"Parameters file UID {st.st_uid} does not match current user UID {os.getuid()}"
+            )
+        file_obj = os.fdopen(fd, "r", encoding="utf-8")
+        return json.load(file_obj)
+    finally:
+        if file_obj is not None:
+            file_obj.close()
+        else:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+
+
+from inkmcp.inkmcpops.element_mapping import (
+    get_element_class,
+    should_place_in_defs,
+    ensure_defs_section,
+    get_unique_id,
+)
+from inkmcp.inkmcpops.common import get_element_info_data
 
 
 def main():

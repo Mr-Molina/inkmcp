@@ -67,11 +67,71 @@ Known Issue: objectBoundingBox gradients require manual nudge to refresh visibil
 import argparse
 import sys
 import json
-import tempfile
 import os
 import subprocess
 import re
-from typing import Dict, List, Any
+import io
+import tokenize
+import builtins
+import keyword
+from pathlib import Path
+from typing import Dict, List, Any, Optional
+
+# Ensure repository root is on sys.path for standalone script execution
+_parent_dir = str(Path(__file__).resolve().parent.parent)
+if _parent_dir not in sys.path:
+    sys.path.insert(0, _parent_dir)
+
+MAX_CLI_RECURSION_DEPTH = 64
+
+INTROSPECTION_ATTRS = {
+    'gi_frame', 'gi_code', 'f_globals', 'f_builtins', 'f_locals',
+    'f_back', 'f_code', 'tb_frame', 'tb_next', 'cr_frame', 'cr_code',
+    'ag_frame', 'ag_code'
+}
+FORMAT_ATTRS = {'format', 'format_map'}
+BANNED_BUILTIN_NAMES = {
+    'eval', 'exec', 'compile', 'open', '__import__', 'getattr', 'setattr',
+    'delattr', 'globals', 'locals', 'vars', 'breakpoint', 'input'
+}
+PROTECTED_BINDINGS = {'json', 're', '__builtins__'}
+
+
+def execute_inkscape_block_via_cli(
+    code: str,
+    variables: Optional[Dict[str, Any]] = None,
+    client: Optional['InkscapeClient'] = None,
+) -> Dict[str, Any]:
+    """
+    Execute an Inkscape code block via CLI/D-Bus with filtered variable injection.
+    Only allows variable names where k.isidentifier() and not keyword.iskeyword(k) and not k.startswith("_").
+    """
+    if variables is None:
+        variables = {}
+    if client is None:
+        client = InkscapeClient()
+
+    cleaned_code = strip_python_comments(code)
+    context_injection = []
+    for k, v in variables.items():
+        key_str = str(k)
+        if (
+            key_str.isidentifier()
+            and not keyword.iskeyword(key_str)
+            and not key_str.startswith('_')
+            and key_str not in {'svg', 'document', 'inkex', 'self', '__builtins__', 'json', 're'}
+        ):
+            context_injection.append(f"{key_str} = {repr(v)}")
+
+    full_code = '\n'.join(context_injection) + '\n' + cleaned_code if context_injection else cleaned_code
+    element_data = {
+        'tag': 'execute-code',
+        'attributes': {
+            'code': full_code,
+            'return_output': True
+        }
+    }
+    return client.execute_command(element_data)
 
 
 def strip_python_comments(code: str) -> str:
@@ -82,8 +142,8 @@ def strip_python_comments(code: str) -> str:
     - Inline comments (# at end of line)
     
     Preserves:
-    - # characters inside strings
-    - # characters in certain contexts (like f-strings, format strings)
+    - Docstrings and multiline strings
+    - Hex colors and hashes inside quotes
     
     Args:
         code: Python code string
@@ -93,54 +153,16 @@ def strip_python_comments(code: str) -> str:
     """
     if not code.strip():
         return code
-    
-    lines = code.split('\n')
-    cleaned_lines = []
-    
-    for line in lines:
-        stripped = line.lstrip()
-        
-        # Skip full-line comments
-        if stripped.startswith('#'):
-            continue
-        
-        # Handle inline comments - simple approach that works for most cases
-        # Remove everything after # if it's not inside quotes
-        in_single_quote = False
-        in_double_quote = False
-        escape_next = False
-        cleaned_line = []
-        
-        for i, char in enumerate(line):
-            if escape_next:
-                cleaned_line.append(char)
-                escape_next = False
-                continue
-            
-            if char == '\\':
-                escape_next = True
-                cleaned_line.append(char)
-                continue
-            
-            if char == "'" and not in_double_quote:
-                in_single_quote = not in_single_quote
-                cleaned_line.append(char)
-            elif char == '"' and not in_single_quote:
-                in_double_quote = not in_double_quote
-                cleaned_line.append(char)
-            elif char == '#' and not in_single_quote and not in_double_quote:
-                # Found inline comment, stop here
-                break
-            else:
-                cleaned_line.append(char)
-        
-        result_line = ''.join(cleaned_line).rstrip()
-        
-        # Only add non-empty lines
-        if result_line:
-            cleaned_lines.append(result_line)
-    
-    return '\n'.join(cleaned_lines)
+
+    try:
+        tokens = tokenize.generate_tokens(io.StringIO(code).readline)
+        filtered = [tok for tok in tokens if tok.type != tokenize.COMMENT]
+        untokenized = tokenize.untokenize(filtered)
+        lines = [line.rstrip() for line in untokenized.split('\n')]
+        return '\n'.join(lines)
+    except (tokenize.TokenError, IndentationError, SyntaxError):
+        # Fallback if code cannot be tokenized as valid Python
+        return code
 
 
 def parse_hybrid_blocks(code: str) -> List[tuple[str, str]]:
@@ -163,19 +185,19 @@ def parse_hybrid_blocks(code: str) -> List[tuple[str, str]]:
     lines = code.split('\n')
     blocks = []
     current_type = 'local'  # Default to local
-    current_lines = []
+    current_lines: List[str] = []
     
     for line in lines:
         stripped = line.strip()
         
-        # Check for magic comments
-        if stripped == '# @local':
+        # Check for magic comments (supporting whitespace and tabs)
+        if re.match(r'^#\s*@local$', stripped):
             # Save current block if it has content
             if current_lines:
                 blocks.append((current_type, '\n'.join(current_lines)))
                 current_lines = []
             current_type = 'local'
-        elif stripped == '# @inkscape':
+        elif re.match(r'^#\s*@inkscape$', stripped):
             # Save current block if it has content
             if current_lines:
                 blocks.append((current_type, '\n'.join(current_lines)))
@@ -192,7 +214,7 @@ def parse_hybrid_blocks(code: str) -> List[tuple[str, str]]:
     return blocks
 
 
-def serialize_context_variables(local_vars: Dict[str, Any], exclude_names: set = None) -> Dict[str, Any]:
+def serialize_context_variables(local_vars: Dict[str, Any], exclude_names: Optional[set[str]] = None) -> Dict[str, Any]:
     """
     Extract JSON-serializable variables from local execution context.
     
@@ -222,6 +244,10 @@ def serialize_context_variables(local_vars: Dict[str, Any], exclude_names: set =
         if type(value).__name__ == 'module':
             continue
         
+        # Skip non-serializable callables/functions cleanly without raising TypeError
+        if callable(value) or isinstance(value, type):
+            continue
+
         # Test JSON serializability
         try:
             json.dumps(value)
@@ -262,7 +288,6 @@ def execute_hybrid_code(client: 'InkscapeClient', code: str, args) -> Dict[str, 
     Returns:
         Result dictionary with execution details
     """
-    import io
     from contextlib import redirect_stdout, redirect_stderr
     
     # Parse code into blocks
@@ -275,7 +300,7 @@ def execute_hybrid_code(client: 'InkscapeClient', code: str, args) -> Dict[str, 
         }
     
     # Shared context for variables
-    shared_context = {}
+    shared_context: Dict[str, Any] = {}
     
     # Track all outputs
     all_local_output = []
@@ -290,25 +315,106 @@ def execute_hybrid_code(client: 'InkscapeClient', code: str, args) -> Dict[str, 
         if block_type == 'local':
             # Execute locally
             try:
+                # Restrict builtins to safe primitives whitelist
+                safe_builtins = {
+                    name: getattr(builtins, name)
+                    for name in (
+                        "abs", "all", "any", "bool", "dict", "enumerate", "float", "int",
+                        "len", "list", "max", "min", "range", "round", "set", "str",
+                        "sum", "tuple", "zip", "print"
+                    )
+                    if hasattr(builtins, name) and name not in BANNED_BUILTIN_NAMES
+                }
+
                 # Set up local execution environment with standard modules
-                injected_names = {'json', 're', 'os', 'sys', '__builtins__'}
+                # SECURITY: os and sys are intentionally excluded — they provide
+                # file-system and process access that must not be available here.
+                injected_names = {'json', 're', '__builtins__'}
                 local_env = {
-                    '__builtins__': __builtins__,
+                    '__builtins__': safe_builtins.copy(),
                     'json': json,
                     're': re,
-                    'os': os,
-                    'sys': sys,
                 }
                 
-                # Inject shared context (from previous blocks)
-                local_env.update(shared_context)
+                # Inject shared context (from previous blocks), strictly protecting core bindings
+                for key, value in shared_context.items():
+                    key_str = str(key)
+                    if (
+                        key_str not in PROTECTED_BINDINGS
+                        and key_str.isidentifier()
+                        and not keyword.iskeyword(key_str)
+                        and not key_str.startswith('_')
+                    ):
+                        local_env[key_str] = value
+
+                # AST pre-validation: block dangerous patterns before exec()
+                import ast
+                violations = []
+                try:
+                    tree = ast.parse(block_code)
+                    class SecurityVisitor(ast.NodeVisitor):
+                        def visit_Attribute(self, node):
+                            if node.attr.startswith("__"):
+                                violations.append(f"Disallowed dunder attribute access: {node.attr}")
+                            elif node.attr in INTROSPECTION_ATTRS:
+                                violations.append(f"Disallowed introspection attribute access: {node.attr}")
+                            elif node.attr in FORMAT_ATTRS:
+                                violations.append(f"Disallowed format attribute access: {node.attr}")
+                            self.generic_visit(node)
+
+                        def visit_Call(self, node):
+                            if isinstance(node.func, ast.Attribute) and node.func.attr in FORMAT_ATTRS:
+                                violations.append(f"Disallowed format call: {node.func.attr}")
+                            elif isinstance(node.func, ast.Name) and node.func.id in FORMAT_ATTRS:
+                                violations.append(f"Disallowed format call: {node.func.id}")
+                            self.generic_visit(node)
+
+                        def visit_Name(self, node):
+                            if node.id in BANNED_BUILTIN_NAMES:
+                                violations.append(f"Disallowed builtin usage: {node.id}")
+                            elif node.id.startswith("__") and node.id != "__":
+                                violations.append(f"Disallowed dunder identifier reference: {node.id}")
+                            self.generic_visit(node)
+
+                    SecurityVisitor().visit(tree)
+                except SyntaxError:
+                    violations.append("Syntax error")
+
+                if not violations:
+                    from inkmcp.inkmcpops.execute_operations import _validate_code_safety
+                    violations = _validate_code_safety(block_code) or []
+
+                if violations:
+                    sec_msg = (
+                        f"[Security] Block {block_idx + 1} skipped — "
+                        f"violations: {'; '.join(violations)}"
+                    )
+                    print(sec_msg)
+                    combined_errors.append(sec_msg)
+                    continue
                 
                 # Capture output
                 stdout_capture = io.StringIO()
                 stderr_capture = io.StringIO()
                 
+                print(f"[Security Log] Executing dynamic block {block_idx + 1} with isolated builtins.")
+                
+                # SEC-009: Isolate __builtins__ from module modification and restrict dangerous functions
+                if "__builtins__" in local_env and isinstance(local_env["__builtins__"], dict):
+                    local_env["__builtins__"] = {
+                        k: v for k, v in local_env["__builtins__"].items()
+                        if k not in BANNED_BUILTIN_NAMES and not k.startswith("__")
+                    }
+                else:
+                    local_env["__builtins__"] = safe_builtins.copy()
+                
                 with redirect_stdout(stdout_capture), redirect_stderr(stderr_capture):
-                    exec(block_code, local_env)
+                    try:
+                        exec(block_code, local_env)
+                    except Exception as e:
+                        print(f"[Security/Execution Error] Block {block_idx + 1} trapped: {e}")
+                        combined_errors.append(f"[Local Block {block_idx + 1} Error] {e}")
+                        continue
                 
                 # Capture output
                 stdout_out = stdout_capture.getvalue()
@@ -320,11 +426,13 @@ def execute_hybrid_code(client: 'InkscapeClient', code: str, args) -> Dict[str, 
                     combined_errors.append(f"[Local Block {block_idx + 1} stderr]\\n{stderr_out}")
                 
                 # Update shared context with new/modified variables
-                # Exclude system modules we injected
+                # Exclude system modules we injected and protected bindings
                 exclude_set = injected_names.copy()
+                exclude_set.update(PROTECTED_BINDINGS)
                 # Also exclude previously shared variables to avoid re-processing
-                # (they're already in shared_context)
                 serializable = serialize_context_variables(local_env, exclude_names=exclude_set)
+                for p in PROTECTED_BINDINGS:
+                    serializable.pop(p, None)
                 shared_context.update(serializable)
                 
             except Exception as e:
@@ -347,8 +455,15 @@ def execute_hybrid_code(client: 'InkscapeClient', code: str, args) -> Dict[str, 
                 # We need to inject the shared context as variable assignments
                 context_injection = []
                 for key, value in shared_context.items():
-                    # Serialize the value as Python literal using repr()
-                    context_injection.append(f"{key} = {repr(value)}")
+                    key_str = str(key)
+                    if (
+                        key_str.isidentifier()
+                        and not keyword.iskeyword(key_str)
+                        and key_str not in {'svg', 'document', 'inkex', 'self', '__builtins__', 'json', 're'}
+                        and not key_str.startswith('_')
+                    ):
+                        # Serialize the value as Python literal using repr()
+                        context_injection.append(f"{key_str} = {repr(value)}")
                 
                 # Combine context injection with user code
                 full_inkscape_code = '\n'.join(context_injection) + '\n' + cleaned_code if context_injection else cleaned_code
@@ -395,8 +510,16 @@ def execute_hybrid_code(client: 'InkscapeClient', code: str, args) -> Dict[str, 
                     # Extract variables from Inkscape execution and add to shared context
                     # This enables Inkscape → Local variable flow
                     inkscape_vars = data.get('local_variables', {})
-                    if inkscape_vars:
-                        shared_context.update(inkscape_vars)
+                    if inkscape_vars and isinstance(inkscape_vars, dict):
+                        for k, v in inkscape_vars.items():
+                            key_str = str(k)
+                            if (
+                                key_str.isidentifier()
+                                and not keyword.iskeyword(key_str)
+                                and key_str not in {'svg', 'document', 'inkex', 'self', '__builtins__', 'json', 're'}
+                                and not key_str.startswith('_')
+                            ):
+                                shared_context[key_str] = v
                     
                     if not inkscape_result['execution_successful']:
                         # Fail fast on Inkscape errors
@@ -425,37 +548,69 @@ def execute_hybrid_code(client: 'InkscapeClient', code: str, args) -> Dict[str, 
     # Build final result
     final_output = ''.join(all_local_output) if all_local_output else ''
     final_errors = '\n'.join(combined_errors) if combined_errors else None
-    
-    return {
-        "success": True,
+    has_errors = bool(combined_errors)
+
+    result_dict: Dict[str, Any] = {
+        "success": not has_errors,
         "response": {
-            "status": "success",
+            "status": "error" if has_errors else "success",
             "data": {
-                "message": f"Hybrid execution completed ({len(blocks)} blocks)",
+                "message": (
+                    f"Hybrid execution completed ({len(blocks)} blocks)"
+                    if not has_errors
+                    else f"Hybrid execution failed ({len(blocks)} blocks)"
+                ),
                 "blocks_executed": len(blocks),
                 "local_output": final_output,
                 "inkscape_results": all_inkscape_results,
                 "errors": final_errors,
-                "execution_successful": final_errors is None
-            }
-        }
+                "execution_successful": not has_errors,
+            },
+        },
     }
+    if has_errors:
+        result_dict["error"] = final_errors
+
+    return result_dict
 
 
-def parse_children_array(children_str: str) -> List[Dict[str, Any]]:
+def parse_children_array(children_str: str, _depth: int = 0) -> List[Dict[str, Any]]:
     """
     Parse children array string like "[{rect 'x=0 y=0'}, {circle 'cx=25 cy=25'}]"
 
     Args:
         children_str: String containing children array
+        _depth: Current recursion depth
 
     Returns:
         List of parsed child element dictionaries
     """
+    if _depth > MAX_CLI_RECURSION_DEPTH:
+        raise ValueError("Maximum element nesting depth exceeded")
+
     if not children_str.strip():
         return []
 
     children_str = children_str.strip()
+
+    # Check if valid JSON list and return directly
+    try:
+        parsed_json = json.loads(children_str)
+        if isinstance(parsed_json, list):
+            def _check_json_depth(items, current_depth):
+                if current_depth > MAX_CLI_RECURSION_DEPTH:
+                    raise ValueError("Maximum element nesting depth exceeded")
+                for item in items:
+                    if isinstance(item, dict) and "children" in item:
+                        child_c = item["children"]
+                        if isinstance(child_c, list):
+                            _check_json_depth(child_c, current_depth + 1)
+                        elif isinstance(child_c, str):
+                            parse_children_array(child_c, _depth=current_depth + 1)
+            _check_json_depth(parsed_json, _depth)
+            return parsed_json
+    except (json.JSONDecodeError, ValueError, TypeError):
+        pass
 
     # Remove outer brackets
     if children_str.startswith('[') and children_str.endswith(']'):
@@ -467,10 +622,41 @@ def parse_children_array(children_str: str) -> List[Dict[str, Any]]:
     children = []
     brace_count = 0
     current_child = ""
+    in_quote: Optional[str] = None
+    escaped = False
     i = 0
 
     while i < len(children_str):
         char = children_str[i]
+
+        if escaped:
+            escaped = False
+            if brace_count > 0:
+                current_child += char
+            i += 1
+            continue
+
+        if char == '\\':
+            escaped = True
+            if brace_count > 0:
+                current_child += char
+            i += 1
+            continue
+
+        if in_quote:
+            if char == in_quote:
+                in_quote = None
+            if brace_count > 0:
+                current_child += char
+            i += 1
+            continue
+
+        if char in ("'", '"'):
+            in_quote = char
+            if brace_count > 0:
+                current_child += char
+            i += 1
+            continue
 
         if char == '{':
             brace_count += 1
@@ -484,7 +670,7 @@ def parse_children_array(children_str: str) -> List[Dict[str, Any]]:
             if brace_count == 0:
                 # End of current child, parse it
                 if current_child.strip():
-                    child_data = parse_tag_and_attributes(current_child.strip())
+                    child_data = parse_tag_and_attributes(current_child.strip(), _depth=_depth + 1)
                     if child_data:
                         children.append(child_data)
                 current_child = ""
@@ -503,23 +689,27 @@ def parse_children_array(children_str: str) -> List[Dict[str, Any]]:
 
     # Handle any remaining child
     if current_child.strip():
-        child_data = parse_tag_and_attributes(current_child.strip())
+        child_data = parse_tag_and_attributes(current_child.strip(), _depth=_depth + 1)
         if child_data:
             children.append(child_data)
 
     return children
 
 
-def parse_tag_and_attributes(content: str) -> Dict[str, Any] | None:
+def parse_tag_and_attributes(content: str, _depth: int = 0) -> Dict[str, Any] | None:
     """
     Parse content like "stop 'offset=\"0%\" stop-color=\"blue\"'" into element data
 
     Args:
         content: String with tag followed by attributes
+        _depth: Current recursion depth
 
     Returns:
         Element data dictionary or None if parsing fails
     """
+    if _depth > MAX_CLI_RECURSION_DEPTH:
+        raise ValueError("Maximum element nesting depth exceeded")
+
     content = content.strip()
     if not content:
         return None
@@ -530,12 +720,18 @@ def parse_tag_and_attributes(content: str) -> Dict[str, Any] | None:
         return None
 
     tag = parts[0]
-    attr_str = parts[1] if len(parts) > 1 else ""
+    attr_str = parts[1].strip() if len(parts) > 1 else ""
+
+    # Strip surrounding single/double quotes from attr_str if present
+    if (len(attr_str) >= 2 and 
+        ((attr_str.startswith("'") and attr_str.endswith("'")) or 
+         (attr_str.startswith('"') and attr_str.endswith('"')))):
+        attr_str = attr_str[1:-1].strip()
 
     # Parse attributes using existing logic
     attributes = parse_attributes(attr_str)
 
-    element_data = {
+    element_data: Dict[str, Any] = {
         "tag": tag,
         "attributes": attributes
     }
@@ -544,7 +740,20 @@ def parse_tag_and_attributes(content: str) -> Dict[str, Any] | None:
     if 'children' in attributes:
         children_value = attributes.pop('children')
         if isinstance(children_value, str):
-            element_data["children"] = parse_children_array(children_value)
+            element_data["children"] = parse_children_array(children_value, _depth=_depth + 1)
+        elif isinstance(children_value, list):
+            def _check_list_depth(items, current_depth):
+                if current_depth > MAX_CLI_RECURSION_DEPTH:
+                    raise ValueError("Maximum element nesting depth exceeded")
+                for item in items:
+                    if isinstance(item, dict) and "children" in item:
+                        child_c = item["children"]
+                        if isinstance(child_c, list):
+                            _check_list_depth(child_c, current_depth + 1)
+                        elif isinstance(child_c, str):
+                            parse_children_array(child_c, _depth=current_depth + 1)
+            _check_list_depth(children_value, _depth + 1)
+            element_data["children"] = children_value
         else:
             element_data["children"] = children_value
 
@@ -566,27 +775,20 @@ def parse_attributes(param_str: str) -> Dict[str, Any]:
 
     attributes = {}
 
-    # Enhanced regex to handle quoted values, arrays, and objects (including multiline)
-    # Pattern explanation:
-    # - (\w+(?:[:-]\w+)*) : key name with optional hyphens/underscores/colons (for namespaces)
-    # - = : equals sign
-    # - Group of alternatives for value:
-    #   - "([^"]*)" : double quoted content (group 2)
-    #   - '([^']*)' : single quoted content (group 3)
-    #   - (\[(?:[^\[\]]|\{[^}]*\}|\[[^\]]*\])*\]) : array content (group 4)
-    #   - ([^\s,=]+) : unquoted content (group 5)
-    param_pattern = r'(\w+(?:[:-]\w+)*)=("([^"]*)"|\'([^\']*)\'|(\[(?:[^\[\]]|\{[^}]*\}|\[[^\]]*\])*\])|([^\s,=]+))'
+    # Refactored param_pattern (LOGIC-001 & LOGIC-007 & CLI-005)
+    # Using disjoint regex alternatives to prevent ReDoS / catastrophic backtracking on unclosed quotes
+    param_pattern = r'(\w+(?:[:-]\w+)*)=("((?:[^"\\]|\\.)*)"|\'((?:[^\'\\]|\\.)*)\'|(\[[^\]]*\])|([^\s,=]+))'
     raw_matches = re.findall(param_pattern, param_str, re.DOTALL)
 
     for match in raw_matches:
         key = match[0]
         full_value = match[1]
 
-        # Extract the actual value based on quoting type
+        # Extract the actual value based on quoting type and unescape quotes
         if full_value.startswith('"') and full_value.endswith('"'):
-            value = match[2]  # Double quoted content
+            value = match[2].replace(r'\"', '"').replace(r"\'", "'")
         elif full_value.startswith("'") and full_value.endswith("'"):
-            value = match[3]  # Single quoted content
+            value = match[3].replace(r"\'", "'").replace(r'\"', '"')
         elif full_value.startswith('['):
             value = match[4]  # Array content (keep as string for later parsing)
         else:
@@ -596,7 +798,7 @@ def parse_attributes(param_str: str) -> Dict[str, Any]:
         if key == 'children' and isinstance(value, str) and value.startswith('['):
             # Keep as string for later recursive parsing
             attributes[key] = value
-        elif value.startswith('[') and value.endswith(']'):
+        elif isinstance(value, str) and value.startswith('[') and value.endswith(']'):
             # Try to parse as JSON array
             try:
                 attributes[key] = json.loads(value)
@@ -609,6 +811,168 @@ def parse_attributes(param_str: str) -> Dict[str, Any]:
     return attributes
 
 
+def resolve_cli_file_path(file_path: str, strict_boundary: bool = False) -> str:
+    """
+    Resolve and validate a file path supplied via -f/--file.
+    Rejects symlinks when strict_boundary is active and ensures clean canonical path resolution.
+
+    Raises:
+        ValueError: If security boundaries or symlink restrictions are violated.
+        FileNotFoundError: If the resolved path does not exist.
+    """
+    p = Path(file_path)
+    abs_str = os.path.abspath(file_path)
+
+    if strict_boundary:
+        if p.is_symlink() or os.path.islink(file_path) or Path(abs_str).is_symlink():
+            raise ValueError(f"Symlinks are not permitted under --strict-boundary: {file_path}")
+
+        canonical = Path(abs_str).resolve()
+        cwd = Path.cwd().resolve()
+        if not canonical.is_relative_to(cwd):
+            raise ValueError(f"File path outside expected boundary: {abs_str}")
+        target_path = str(canonical)
+    else:
+        target_path = str(Path(abs_str).resolve())
+
+    if not os.path.exists(target_path):
+        raise FileNotFoundError(f"File not found: {target_path}")
+
+    return target_path
+
+
+def normalize_vectorize_params(params: Dict[str, Any], tag: str = "vectorize-image") -> Dict[str, Any]:
+    """
+    Ensure normalized parameter dictionary for vectorize-image and vectorize-coloring-book (GLB-016).
+    Guarantees dispatch parity between CLI subcommands and JSON -p payloads.
+    """
+    normalized = dict(params)
+    tag_norm = tag.lower().replace("_", "-")
+
+    if tag_norm == "vectorize-coloring-book":
+        if "mode" not in normalized or not normalized["mode"]:
+            normalized["mode"] = "coloring_book"
+
+    # Type normalization for common parameters across CLI and JSON
+    if "num_colors" in normalized:
+        try:
+            normalized["num_colors"] = int(normalized["num_colors"])
+        except (ValueError, TypeError):
+            pass
+
+    for float_key in ("filter_speckle", "smoothness", "color_tolerance", "corner_threshold", "segment_length"):
+        if float_key in normalized:
+            try:
+                normalized[float_key] = float(normalized[float_key])
+            except (ValueError, TypeError):
+                pass
+
+    for bool_key in ("inject_to_inkscape", "denoise", "remove_background"):
+        if bool_key in normalized:
+            v = normalized[bool_key]
+            if isinstance(v, str):
+                normalized[bool_key] = v.strip().lower() in ("true", "1", "yes", "on")
+            elif isinstance(v, (int, bool)):
+                normalized[bool_key] = bool(v)
+
+    return normalized
+
+
+def parse_vectorize_params(raw_params: Any) -> Dict[str, Any]:
+    """
+    Parse vectorize-image CLI parameters from list of tokens, string, or JSON.
+    Preserves paths with spaces without stripping or improper truncation.
+    Supported modes: 'cut_ready', 'layered', 'silhouette', 'coloring_book'.
+    Supported tuning: 'corner_threshold', 'segment_length', 'filter_speckle', 'smoothness'.
+    """
+    if raw_params is None:
+        return {}
+
+    if isinstance(raw_params, dict):
+        return raw_params
+
+    if isinstance(raw_params, list):
+        if not raw_params:
+            return {}
+        # Handle positional or unwrapped -p flag
+        if raw_params[0] in ("-p", "--payload", "--params"):
+            if len(raw_params) > 1:
+                return parse_vectorize_params(" ".join(raw_params[1:]))
+            return {}
+        if len(raw_params) == 1:
+            return parse_vectorize_params(raw_params[0])
+
+        result: Dict[str, Any] = {}
+        current_key: Optional[str] = None
+        current_val_parts: List[str] = []
+
+        for token in raw_params:
+            m = re.match(r"^([a-zA-Z_]\w*)=(.*)$", token, re.DOTALL)
+            if m:
+                if current_key is not None:
+                    val = " ".join(current_val_parts).strip()
+                    if (val.startswith('"') and val.endswith('"')) or (
+                        val.startswith("'") and val.endswith("'")
+                    ):
+                        val = val[1:-1]
+                    result[current_key] = val
+                    current_val_parts = []
+                current_key = m.group(1)
+                v = m.group(2)
+                if v:
+                    current_val_parts.append(v)
+            else:
+                if current_key is not None:
+                    current_val_parts.append(token)
+
+        if current_key is not None:
+            val = " ".join(current_val_parts).strip()
+            if (val.startswith('"') and val.endswith('"')) or (
+                val.startswith("'") and val.endswith("'")
+            ):
+                val = val[1:-1]
+            result[current_key] = val
+
+        return result
+
+    raw_str = str(raw_params).strip()
+    if not raw_str:
+        return {}
+
+    # Strip leading -p/--payload flag if present in string
+    if raw_str.startswith(("-p ", "--payload ", "--params ")):
+        raw_str = raw_str.split(None, 1)[1].strip()
+
+    if raw_str.startswith("{") and raw_str.endswith("}"):
+        try:
+            parsed = json.loads(raw_str)
+            if isinstance(parsed, dict):
+                return parsed
+        except Exception:
+            pass
+
+    result = {}
+    matches = re.finditer(
+        r"(?:^|\s+)([a-zA-Z_]\w*)=(.*?)(?=(?:\s+[a-zA-Z_]\w*=|$))",
+        raw_str,
+        re.DOTALL,
+    )
+    for m in matches:
+        k = m.group(1)
+        v = m.group(2).strip()
+        if (val := v) and (
+            (val.startswith('"') and val.endswith('"'))
+            or (val.startswith("'") and val.endswith("'"))
+        ):
+            v = val[1:-1]
+        result[k] = v
+
+    if result:
+        return result
+
+    return parse_attributes(raw_str)
+
+
 class InkscapeClient:
     """D-Bus client for SVG element creation"""
 
@@ -617,9 +981,6 @@ class InkscapeClient:
         self.dbus_path = "/org/inkscape/Inkscape"
         self.dbus_interface = "org.gtk.Actions"
         self.action_name = "org.khema.inkscape.mcp"
-
-
-
 
     def build_element_data(self, tag: str, param_str: str) -> Dict[str, Any]:
         """
@@ -632,58 +993,56 @@ class InkscapeClient:
         Returns:
             Element data dictionary
         """
+        # Handle vectorize-image and vectorize-coloring-book commands
+        tag_norm = tag.lower().replace("_", "-")
+        if tag_norm in ("vectorize-image", "vectorize-coloring-book"):
+            attrs = parse_vectorize_params(param_str)
+            attrs = normalize_vectorize_params(attrs, tag=tag)
+            return {"tag": tag, "attributes": attrs}
+
         # Use the unified parsing approach
         full_content = f"{tag} {param_str}".strip()
         result = parse_tag_and_attributes(full_content)
         return result if result is not None else {"tag": tag, "attributes": {}}
 
-    def execute_command(self, element_data: Dict[str, Any]) -> Dict[str, Any]:
-        """Execute command via D-Bus"""
+    def execute_operation(self, element_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Execute operation via InkscapeConnection dispatcher"""
         try:
-            # Create temporary response file for reverse communication (like original system)
-            response_fd, response_file = tempfile.mkstemp(suffix='.json', prefix='inkmcp_response_')
-            os.close(response_fd)  # Close the file descriptor, we just need the path
-            element_data['response_file'] = response_file
-
-            # Write parameters to fixed JSON file (like original system)
-            params_file = os.path.join(tempfile.gettempdir(), "mcp_params.json")
-            with open(params_file, 'w') as f:
-                json.dump(element_data, f)
-
-            # Execute D-Bus command (like original system)
-            cmd = [
-                "gdbus", "call",
-                "--session",
-                "--dest", self.dbus_service,
-                "--object-path", self.dbus_path,
-                "--method", f"{self.dbus_interface}.Activate",
-                self.action_name,
-                "[]", "{}"
-            ]
-
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
-
-            if result.returncode != 0:
-                return {
-                    "success": False,
-                    "error": f"D-Bus command failed: {result.stderr}"
-                }
-
-            # Read response from response file (like original system)
-            if os.path.exists(response_file):
+            tag = element_data.get("tag", "")
+            tag_norm = tag.lower().replace("_", "-")
+            if tag_norm in ("vectorize-image", "vectorize-coloring-book"):
                 try:
-                    with open(response_file, 'r') as f:
-                        response = json.load(f)
-                    os.remove(response_file)
-                    return {"success": True, "response": response}
-                except Exception as e:
-                    return {
-                        "success": False,
-                        "error": f"Failed to read response: {str(e)}"
-                    }
+                    from inkmcp.inkscape_mcp_server import InkscapeConnection
+                except ImportError:
+                    from inkscape_mcp_server import InkscapeConnection  # type: ignore[import-not-found, no-redef]
+                try:
+                    from inkmcp.inkmcpops import vectorize_image_operation
+                except ImportError:
+                    from inkmcpops import vectorize_image_operation  # type: ignore[import-not-found, no-redef]
 
-            return {"success": True, "output": result.stdout}
+                conn = InkscapeConnection(allow_headless=True)
+                backend = conn.backend
+                attrs = normalize_vectorize_params(element_data.get("attributes", {}), tag=tag)
+                result = vectorize_image_operation(attrs, backend=backend)
+                if result.get("status") in ("success", "warning"):
+                    return {"success": True, "response": result}
+                else:
+                    error = result.get("message") or result.get("data", {}).get("error", "Vectorization failed")
+                    return {"success": False, "error": error, "response": result}
 
+            try:
+                from inkmcp.inkscape_mcp_server import InkscapeConnection
+            except ImportError:
+                from inkscape_mcp_server import InkscapeConnection  # type: ignore[import-not-found, no-redef]
+
+            conn = InkscapeConnection(allow_headless=True)
+            result = conn.execute_operation(element_data)
+
+            if result.get("status") == "success":
+                return {"success": True, "response": result}
+            else:
+                error = result.get("data", {}).get("error", "Unknown error")
+                return {"success": False, "error": error, "response": result}
         except subprocess.TimeoutExpired:
             return {
                 "success": False,
@@ -695,6 +1054,10 @@ class InkscapeClient:
                 "error": f"Execution failed: {str(e)}"
             }
 
+    def execute_command(self, element_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Execute command via D-Bus (alias for execute_operation)"""
+        return self.execute_operation(element_data)
+
     def format_response(self, result: Dict[str, Any], tag: str = "") -> str:
         """Format the response for display - minimal output by default"""
         if not result.get("success"):
@@ -703,6 +1066,17 @@ class InkscapeClient:
         # Check if we have a proper response from response file
         if "response" in result:
             response_data = result["response"]
+            if tag.lower().replace("_", "-") in ("vectorize-image", "vectorize-coloring-book"):
+                data = response_data.get("data", {})
+                status_icon = "✅" if response_data.get("status") == "success" else "⚠️"
+                msg = response_data.get("message", "Vectorization completed")
+                out_path = data.get("output_path", "")
+                layer_cnt = data.get("layer_count", 0)
+                node_cnt = data.get("total_nodes", 0)
+                if out_path:
+                    return f"{status_icon} {msg}\nOutput: {out_path} ({layer_cnt} layers, {node_cnt} nodes)"
+                return f"{status_icon} {msg}"
+
             if response_data.get("status") == "success":
                 data = response_data.get("data", {})
                 
@@ -758,11 +1132,26 @@ class InkscapeClient:
                 error = response_data.get("data", {}).get("error", "Unknown error")
                 return f"Error: {error}"
 
-        except (json.JSONDecodeError, KeyError):
-            return "Success"
+        except (json.JSONDecodeError, KeyError) as e:
+            raw = result.get("output", "").strip()
+            if raw:
+                return f"Error: Failed to parse response ({str(e)}): {raw}"
+            return f"Error: Failed to parse response: {str(e)}"
 
 
 def main():
+    # Ensure UTF-8 output encoding for cross-platform Unicode/emoji support on Windows
+    if hasattr(sys.stdout, "reconfigure"):
+        try:
+            sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+    if hasattr(sys.stderr, "reconfigure"):
+        try:
+            sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+
     parser = argparse.ArgumentParser(
         description="Inkscape MCP Client",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -789,6 +1178,12 @@ Examples:
   # Use file for parameters (file content replaces parameter string)
   python inkmcpcli.py circle -f circle_params.txt
 
+  # Vectorize image into cut decal or layered SVG (modes: cut_ready, layered, silhouette)
+  python inkmcpcli.py vectorize-image "image_path=art.png mode=silhouette output_path=art.svg corner_threshold=25 segment_length=2.0"
+
+  # Vectorize coloring book line art with interactive bucket fills
+  python inkmcpcli.py vectorize-coloring-book "image_path=art.png output_path=art.svg"
+
   # Get selection info
   python inkmcpcli.py get-selection ""
 
@@ -798,26 +1193,138 @@ Examples:
     )
 
     parser.add_argument("tag", help="SVG tag name or info action")
-    parser.add_argument("params", nargs="?", default="", help="Parameters string")
+    parser.add_argument("params", nargs="*", default=[], help="Parameters string")
     parser.add_argument("-f", "--file", help="Read parameters from file")
+    parser.add_argument("-p", "--payload", "--params", dest="payload", help="JSON payload or parameter string")
     parser.add_argument("--parse-out", action="store_true", help="Parse and return structured JSON response")
     parser.add_argument("--pretty", action="store_true", help="Pretty print JSON output")
+    parser.add_argument("--strict-boundary", action="store_true", help="Prevent arbitrary path traversal outside expected boundaries")
 
     args = parser.parse_args()
 
     client = InkscapeClient()
 
     try:
-        # Initialize params
-        params = args.params
+        # Handle vectorize-image and vectorize-coloring-book commands
+        tag_norm = args.tag.lower().replace("_", "-")
+        if tag_norm in ("vectorize-image", "vectorize-coloring-book"):
+            if args.file:
+                try:
+                    abs_file_path = resolve_cli_file_path(args.file, strict_boundary=args.strict_boundary)
+                except ValueError as ve:
+                    print(f"[Security Error] ❌ {ve}", file=sys.stderr)
+                    return 1
+                except FileNotFoundError as fe:
+                    print(f"❌ {fe}", file=sys.stderr)
+                    return 1
+
+                if args.params and any(p.strip() for p in args.params):
+                    print("❌ Cannot use both -f option and parameters", file=sys.stderr)
+                    return 1
+
+                with open(abs_file_path, "r", encoding="utf-8") as f:
+                    file_content = f.read().strip()
+                params_dict = parse_vectorize_params(file_content)
+            elif getattr(args, "payload", None):
+                params_dict = parse_vectorize_params(args.payload)
+            else:
+                params_dict = parse_vectorize_params(args.params)
+
+            params_dict = normalize_vectorize_params(params_dict, tag=args.tag)
+
+            # Validate mode parameter if explicitly specified
+            valid_modes = ("cut_ready", "layered", "silhouette", "coloring_book")
+            mode = params_dict.get("mode")
+            if mode is not None and str(mode).strip() not in valid_modes:
+                params_str = " ".join(args.params) if isinstance(args.params, list) else str(args.params)
+                err_msg = f"Unsupported mode: '{mode}'. Must be 'cut_ready', 'layered', 'silhouette', or 'coloring_book'"
+                if args.parse_out or args.pretty:
+                    output = {
+                        "command": f"{args.tag} {params_str}".strip(),
+                        "tag": args.tag,
+                        "status": "error",
+                        "error": err_msg,
+                        "result": {"status": "error", "message": err_msg, "data": {"error": err_msg}},
+                    }
+                    if args.pretty:
+                        print(json.dumps(output, indent=2))
+                    else:
+                        print(json.dumps(output))
+                else:
+                    print(f"❌ Error: {err_msg}", file=sys.stderr)
+                return 1
+
+            try:
+                from inkmcp.inkscape_mcp_server import InkscapeConnection
+            except ImportError:
+                from inkscape_mcp_server import InkscapeConnection  # type: ignore[import-not-found, no-redef]
+
+            try:
+                from inkmcp.inkmcpops import vectorize_image_operation
+            except ImportError:
+                from inkmcpops import vectorize_image_operation  # type: ignore[import-not-found, no-redef]
+
+            conn = InkscapeConnection(allow_headless=True)
+            backend = conn.backend
+
+            result = vectorize_image_operation(params_dict, backend=backend)
+
+            is_ok = result.get("status") in ("success", "warning")
+            params_str = " ".join(args.params) if isinstance(args.params, list) else str(args.params)
+
+            if args.parse_out or args.pretty:
+                output = {
+                    "command": f"{args.tag} {params_str}".strip(),
+                    "tag": args.tag,
+                    "status": result.get("status"),
+                    "output_path": result.get("data", {}).get("output_path"),
+                    "layer_count": result.get("data", {}).get("layer_count"),
+                    "mode": result.get("data", {}).get("mode"),
+                    "total_nodes": result.get("data", {}).get("total_nodes"),
+                    "data": result.get("data", {}),
+                    "result": result,
+                }
+                if args.pretty:
+                    print(json.dumps(output, indent=2))
+                else:
+                    print(json.dumps(output))
+            else:
+                if not is_ok:
+                    err_msg = result.get("message") or result.get("data", {}).get("error", "Vectorization failed")
+                    print(f"❌ Error: {err_msg}", file=sys.stderr)
+                else:
+                    data = result.get("data", {})
+                    icon = "✅" if result.get("status") == "success" else "⚠️"
+                    msg = result.get("message", "Vectorization completed")
+                    out_path = data.get("output_path", "")
+                    layer_cnt = data.get("layer_count", 0)
+                    node_cnt = data.get("total_nodes", 0)
+                    print(f"{icon} {msg}")
+                    if out_path:
+                        print(f"Output: {out_path} ({layer_cnt} layers, {node_cnt} nodes)")
+
+            return 0 if is_ok else 1
+
+        # Initialize params for other commands
+        if getattr(args, "payload", None) and not args.params:
+            params = args.payload
+        elif isinstance(args.params, list):
+            params = " ".join(args.params)
+        else:
+            params = args.params or ""
 
         # Handle file input
         if args.file:
-            if not os.path.exists(args.file):
-                print(f"❌ File not found: {args.file}", file=sys.stderr)
+            try:
+                abs_file_path = resolve_cli_file_path(args.file, strict_boundary=args.strict_boundary)
+            except ValueError as ve:
+                print(f"[Security Error] ❌ {ve}", file=sys.stderr)
+                return 1
+            except FileNotFoundError as fe:
+                print(f"❌ {fe}", file=sys.stderr)
                 return 1
 
-            with open(args.file, 'r', encoding='utf-8') as f:
+            with open(abs_file_path, 'r', encoding='utf-8') as f:
                 file_content = f.read().strip()
 
             if args.tag == "execute-hybrid":
@@ -838,15 +1345,19 @@ Examples:
                         print(json.dumps(result))
                 else:
                     # Minimal human-readable format - only print() output
-                    if result.get('success'):
-                        data = result.get('response', {}).get('data', {})
+                    data = result.get('response', {}).get('data', {})
+                    exec_ok = result.get('success') and (data.get('execution_successful', True) if data else True)
+                    if exec_ok:
                         output = data.get('local_output', '').rstrip()
                         if output:
                             print(output)
                     else:
-                        print(f"Error: {result.get('error', 'Unknown error')}", file=sys.stderr)
+                        err_msg = result.get('error') or (data.get('errors') if data else None) or 'Unknown error'
+                        print(f"Error: {err_msg}", file=sys.stderr)
                 
-                return 0 if result.get('success') else 1
+                data = result.get('response', {}).get('data', {})
+                is_success = bool(result.get('success')) and (data.get('execution_successful', True) if data else True)
+                return 0 if is_success else 1
                 
             elif args.tag == "execute-code":
                 # For execute-code, treat file content as Python code
@@ -876,8 +1387,10 @@ Examples:
                     batch_results = []
                     for line_num, line in enumerate(lines, 1):
                         try:
-                            element_data = parse_tag_and_attributes(line)
-                            if element_data:
+                            element_data = parse_command_string(line)
+                            if element_data and element_data.get("tag"):
+                                if element_data.get('tag') == 'execute-code' and 'code' in element_data.get('attributes', {}):
+                                    element_data['attributes']['code'] = strip_python_comments(element_data['attributes']['code'])
                                 result = client.execute_command(element_data)
                                 batch_results.append({
                                     "line": line_num,
@@ -912,26 +1425,30 @@ Examples:
                 else:
                     # Human-readable output for batch
                     results = []
+                    all_success = True
                     for line_num, line in enumerate(lines, 1):
                         try:
-                            element_data = parse_tag_and_attributes(line)
-                            if element_data:
+                            element_data = parse_command_string(line)
+                            if element_data and element_data.get("tag"):
                                 # Strip comments if this is execute-code
                                 if element_data.get('tag') == 'execute-code' and 'code' in element_data.get('attributes', {}):
                                     element_data['attributes']['code'] = strip_python_comments(element_data['attributes']['code'])
                                 
                                 result = client.execute_command(element_data)
+                                if not result.get('success'):
+                                    all_success = False
                                 results.append(f"Line {line_num}: {client.format_response(result, element_data.get('tag', ''))}")
                             else:
+                                all_success = False
                                 results.append(f"Line {line_num}: ❌ Failed to parse command: {line}")
                         except Exception as e:
+                            all_success = False
                             results.append(f"Line {line_num}: ❌ Error: {str(e)}")
 
                     for result_line in results:
                         print(result_line)
 
                     # Return success if all commands succeeded
-                    all_success = all("❌" not in result_line for result_line in results)
                     return 0 if all_success else 1
             else:
                 # For other commands with -f, file content replaces params
@@ -990,11 +1507,23 @@ def parse_command_string(command: str) -> Dict[str, Any]:
     Args:
         command: Command string like "rect x=100 y=50 width=200 height=100"
                 or "g map_id=myGroup children=[{rect map_id=r1 x=0 y=0}]"
+                or "vectorize-image image_path=..."
 
     Returns:
         Parsed element data dictionary
     """
-    result = parse_tag_and_attributes(command)
+    stripped = command.strip()
+    parts = stripped.split(None, 1)
+    if parts and parts[0].lower().replace("_", "-") in ("vectorize-image", "vectorize-coloring-book"):
+        tag_norm = parts[0].lower().replace("_", "-")
+        param_part = parts[1] if len(parts) > 1 else ""
+        attrs = parse_vectorize_params(param_part)
+        attrs = normalize_vectorize_params(attrs, tag=parts[0])
+        return {
+            "tag": parts[0],
+            "attributes": attrs,
+        }
+    result = parse_tag_and_attributes(stripped)
     return result if result is not None else {"tag": "", "attributes": {}}
 
 
